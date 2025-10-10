@@ -1,23 +1,27 @@
-from flask import Flask, request
-import subprocess, sys, os
+from flask import Flask, request, jsonify
+import subprocess
+import os
 
 app = Flask(__name__)
 
-RUN_KEY = os.environ.get("RUN_KEY")  # اختیاری: کلید ساده جهت امنیت
-
-@app.get("/")
-def health():
+@app.route('/')
+def home():
     return "OK"
 
-@app.get("/run")
-def run_job():
-    if RUN_KEY and request.args.get("key") != RUN_KEY:
-        return "Unauthorized", 401
-    p = subprocess.run([sys.executable, "All_Data.py"], capture_output=True, text=True)
-    body = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
-    code = 200 if p.returncode == 0 else 500
-    return f"Exit: {p.returncode}\n\n{body}", code
+@app.route('/run', methods=['GET'])
+def run_script():
+    key = request.args.get("key", "")
+    run_key = os.getenv("RUN_KEY")
+
+    # اگر کلید تنظیم شده بود، بررسی امنیتی انجام بده
+    if run_key and key != run_key:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        result = subprocess.run(["python", "All_Data.py"], capture_output=True, text=True)
+        return jsonify({"output": result.stdout.strip() or "✅ Done!"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
