@@ -1,3 +1,4 @@
+
 import os, json, sys
 import gspread
 from google.oauth2.service_account import Credentials
@@ -22,14 +23,13 @@ def _nowz():
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 def log(msg: str):
-    """هم روی stdout چاپ می‌کنه هم به فایل لاگ اضافه می‌کنه."""
+    """هم روی stdout چاپ می‌کند هم به فایل لاگ اضافه می‌کند."""
     line = f"[{_nowz()}] {msg}"
     print(line)
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
-        # لاگ‌نویسی نباید اجرای برنامه را بشکند
         pass
 
 # هر اجرا یک هدر کوچک در لاگ
@@ -144,6 +144,14 @@ def getKPI(taskType, recordDate):
         else:
             break
     return chosen
+
+def getKPI_with_fallback(taskType, recordDate):
+    """اول KPI دقیق taskType، اگر نبود به بیس‌تسک برمی‌گردد."""
+    cfg = getKPI(taskType, recordDate)
+    if cfg:
+        return cfg
+    base = base_task_of(taskType)  # Pick/Presort
+    return getKPI(base, recordDate)
 
 # ---------------------------
 # تبدیل تاریخ و ساعت
@@ -314,7 +322,9 @@ for sheet_name in source_sheets:
             continue
 
 # ---------------------------
-# پردازش Pick و Presort → بدون آستانه؛ هر دو Large اگر هر دو وجود داشته باشند
+# پردازش Pick و Presort → مطابق منطق شما:
+# اگر هر دو در یک روز+ساعت باشند ⇒ هر دو Larg
+# اگر تنها باشند ⇒ Pick_Small یا Presort_Small
 # ---------------------------
 pick_rows, presort_rows = [], []
 
@@ -381,17 +391,23 @@ for r in presort_rows:
 
 def append_output_line(base_row, task_type):
     # دی‌داپ فشرده برای Pick/Presort
-    base_t = "Pick" if task_type.startswith("Pick") else "Presort"
+    base_t = base_task_of(task_type)  # Pick یا Presort
     compact_key = f"{base_row['full_name']}||{base_t}||{base_row['date']}||{base_row['hour']}"
     if compact_key in existing_keys_compact:
         return
     existing_keys_compact.add(compact_key)
 
     perf_without, perf_with = "", ""
-    cfg = getKPI(task_type, base_row["raw_date"])
+    cfg = getKPI_with_fallback(task_type, base_row["raw_date"])
     if cfg and base_row["quantity"] > 0 and base_row["occupied"] > 0:
-        perf_without = f"{(base_row['quantity'] / cfg['base']) * 100:.1f}%"
-        perf_with    = f"{(base_row['quantity'] / (base_row['occupied'] * cfg['rotation'])) * 100:.1f}%"
+        try:
+            perf_without = f"{(base_row['quantity'] / cfg['base']) * 100:.1f}%"
+        except Exception:
+            perf_without = ""
+        try:
+            perf_with    = f"{(base_row['quantity'] / (base_row['occupied'] * cfg['rotation'])) * 100:.1f}%"
+        except Exception:
+            perf_with = ""
 
     neg_min = (60 - base_row["occupied"]) if base_row["occupied"] > 0 else ""
     if isinstance(neg_min, (int, float)) and neg_min <= 0:
@@ -413,7 +429,9 @@ def append_output_line(base_row, task_type):
         "", base_row["user"], shift
     ])
 
-# تصمیم نهایی: اگر هر دو وجود دارند ⇒ هر دو Large؛ وگرنه هر کدام بود ⇒ همان Large
+# تصمیم نهایی طبق منطق شما:
+# - اگر هر دو بودند ⇒ هر دو Larg
+# - اگر یکی بود ⇒ همان Small
 for (full_name, date_str, hour), sides in pairs.items():
     p = sides.get("pick")
     s = sides.get("presort")
@@ -422,9 +440,9 @@ for (full_name, date_str, hour), sides in pairs.items():
         append_output_line(p, "Pick_Larg")
         append_output_line(s, "Presort_Larg")
     elif p:
-        append_output_line(p, "Pick_Larg")
+        append_output_line(p, "Pick_Small")
     elif s:
-        append_output_line(s, "Presort_Larg")
+        append_output_line(s, "Presort_Small")
 
 # ---------------------------
 # اضافه کردن به All_Data (فقط موارد جدید)
@@ -446,4 +464,3 @@ except Exception:
     pass
 
 sys.exit(0)
-
