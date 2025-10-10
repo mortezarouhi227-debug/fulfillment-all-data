@@ -1,15 +1,44 @@
+import os, json
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta, date
+import sys
 
 # ---------------------------
-# اتصال به Google Sheets
+# تنظیمات
 # ---------------------------
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-spreadsheet = client.open("Fulfillment Daily Report_FC")
+# اگر خواستی از ENV بخوانی؛ در غیراینصورت همین مقدار پیش‌فرض کار می‌کند
+SPREADSHEET_ID = os.getenv(
+    "SPREADSHEET_ID",
+    "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"  # <- ID شیت شما
+)
+
+# ---------------------------
+# اتصال به Google Sheets (ENV در Render، فایل در لوکال)
+# ---------------------------
+def make_client():
+    try:
+        env_creds = os.getenv("GOOGLE_CREDENTIALS")
+        if env_creds:
+            creds = Credentials.from_service_account_info(json.loads(env_creds), scopes=SCOPES)
+        else:
+            creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f"❌ Auth error: {e}")
+        sys.exit(1)
+
+client = make_client()
+try:
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+except Exception as e:
+    print(f"❌ Unable to open spreadsheet by key: {e}")
+    sys.exit(1)
 
 # ---------------------------
 # تب مقصد (All_Data)
@@ -72,7 +101,7 @@ for row in cfg_data[1:]:
             "rotation": float(row[cfg_headers.index("rotation")]),
             "effective": datetime.strptime(row[cfg_headers.index("effective_from")], "%Y-%m-%d")
         })
-    except:
+    except Exception:
         continue
 
 def getKPI(taskType, recordDate):
@@ -101,7 +130,7 @@ def parse_date_hour(date_raw, hour_raw):
                 try:
                     record_date = datetime.strptime(date_raw, fmt)
                     break
-                except:
+                except Exception:
                     pass
 
         # ساعت
@@ -131,7 +160,7 @@ def parse_date_only(x):
             try:
                 dt = datetime.strptime(x, fmt)
                 return dt.date()
-            except:
+            except Exception:
                 continue
     return None
 
@@ -375,3 +404,6 @@ if new_rows:
     print(f"✅ Added {len(new_rows)} new rows.")
 else:
     print("ℹ️ No new rows to add.")
+
+sys.exit(0)
+
