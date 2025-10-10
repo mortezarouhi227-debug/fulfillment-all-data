@@ -1,22 +1,43 @@
-import os, json
+import os, json, sys
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta, date
-import sys
 
 # ---------------------------
-# تنظیمات
+# تنظیمات عمومی و لاگ
 # ---------------------------
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-# اگر خواستی از ENV بخوانی؛ در غیراینصورت همین مقدار پیش‌فرض کار می‌کند
 SPREADSHEET_ID = os.getenv(
     "SPREADSHEET_ID",
-    "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"  # <- ID شیت شما
+    "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
+
+LOG_PATH = os.getenv("LOG_PATH", "latest_run.log")
+
+def _nowz():
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+def log(msg: str):
+    """هم روی stdout چاپ می‌کنه هم به فایل لاگ اضافه می‌کنه."""
+    line = f"[{_nowz()}] {msg}"
+    print(line)
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        # لاگ‌نویسی نباید اجرای برنامه را بشکند
+        pass
+
+# هر اجرا یک هدر کوچک در لاگ
+try:
+    with open(LOG_PATH, "a", encoding="utf-8") as _f:
+        _f.write("\n" + "="*70 + f"\n[{_nowz()}] ▶️ Run started\n")
+except Exception:
+    pass
 
 # ---------------------------
 # اتصال به Google Sheets (ENV در Render، فایل در لوکال)
@@ -25,19 +46,26 @@ def make_client():
     try:
         env_creds = os.getenv("GOOGLE_CREDENTIALS")
         if env_creds:
-            creds = Credentials.from_service_account_info(json.loads(env_creds), scopes=SCOPES)
+            creds = Credentials.from_service_account_info(
+                json.loads(env_creds), scopes=SCOPES
+            )
+            log("Auth via GOOGLE_CREDENTIALS (ENV).")
         else:
-            creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+            creds = Credentials.from_service_account_file(
+                "credentials.json", scopes=SCOPES
+            )
+            log("Auth via credentials.json (local file).")
         return gspread.authorize(creds)
     except Exception as e:
-        print(f"❌ Auth error: {e}")
+        log(f"❌ Auth error: {e}")
         sys.exit(1)
 
 client = make_client()
 try:
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    log(f"✅ Opened spreadsheet {SPREADSHEET_ID}.")
 except Exception as e:
-    print(f"❌ Unable to open spreadsheet by key: {e}")
+    log(f"❌ Unable to open spreadsheet by key: {e}")
     sys.exit(1)
 
 # ---------------------------
@@ -54,10 +82,12 @@ headers = [
 current_values = target_sheet.get_all_values()
 if len(current_values) == 0:
     target_sheet.append_row(headers)
+    log("Inserted header row in All_Data.")
 else:
     if current_values[0] != headers:
         target_sheet.delete_rows(1)
         target_sheet.insert_row(headers, 1)
+        log("Replaced header row in All_Data (normalized).")
 
 # کلیدهای موجود برای جلوگیری از تکرار (نسخه کامل)
 existing = target_sheet.get_all_values()[1:]
@@ -79,11 +109,11 @@ existing_keys_compact = set()
 for r in existing:
     full_name = r[0]
     task_type = r[1]
-    dt = r[3]
+    dt_str = r[3]
     hr = r[4]
     base_t = base_task_of(task_type)
     if base_t in ("Pick", "Presort"):
-        existing_keys_compact.add(f"{full_name}||{base_t}||{dt}||{hr}")
+        existing_keys_compact.add(f"{full_name}||{base_t}||{dt_str}||{hr}")
 
 # ---------------------------
 # KPI Config
@@ -144,7 +174,7 @@ def parse_date_hour(date_raw, hour_raw):
         elif isinstance(hour_raw, str) and hour_raw.isdigit():
             hour_val = hour_raw
     except Exception as e:
-        print(f"❌ Error parsing date/hour: {e}")
+        log(f"❌ Error parsing date/hour: {e}")
 
     return record_date, hour_val
 
@@ -280,7 +310,7 @@ for sheet_name in source_sheets:
                 ipo_pack, user, shift
             ])
         except Exception as e:
-            print(f"❌ Error in {sheet_name}: {e}")
+            log(f"❌ Error in {sheet_name}: {e}")
             continue
 
 # ---------------------------
@@ -338,7 +368,7 @@ for sheet_name in ["Pick", "Presort"]:
             else:
                 presort_rows.append(base_data)
         except Exception as e:
-            print(f"❌ Error in {sheet_name}: {e}")
+            log(f"❌ Error in {sheet_name}: {e}")
             continue
 
 # ساخت زوج‌ها (full_name, date, hour) → pick/presort
@@ -401,9 +431,19 @@ for (full_name, date_str, hour), sides in pairs.items():
 # ---------------------------
 if new_rows:
     target_sheet.append_rows(new_rows)
-    print(f"✅ Added {len(new_rows)} new rows.")
+    summary = f"✅ Added {len(new_rows)} new rows."
+    log(summary)
 else:
-    print("ℹ️ No new rows to add.")
+    summary = "ℹ️ No new rows to add."
+    log(summary)
+
+# برای اطمینان، یک خلاصه در انتها در لاگ بنویس (اگر stdout استریم نشد)
+try:
+    with open(LOG_PATH, "a", encoding="utf-8") as _f:
+        _f.write(f"[{_nowz()}] {summary}\n")
+        _f.write(f"[{_nowz()}] ⏹ Run finished\n")
+except Exception:
+    pass
 
 sys.exit(0)
 
