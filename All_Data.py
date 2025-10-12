@@ -1,25 +1,24 @@
-import os, json, sys
+# All_Data.py
+import os, sys, json
 from datetime import datetime, timedelta, date
-
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ---------------------------
+# =========================
 # تنظیمات
-# ---------------------------
+# =========================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
 SPREADSHEET_ID = os.getenv(
     "SPREADSHEET_ID",
     "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
 
-# ---------------------------
-# اتصال به گوگل شیت
-# ---------------------------
+# =========================
+# اتصال
+# =========================
 def make_client():
     try:
         env_creds = os.getenv("GOOGLE_CREDENTIALS")
@@ -39,36 +38,95 @@ try:
     ss = client.open_by_key(SPREADSHEET_ID)
     print(f"✅ Opened spreadsheet {SPREADSHEET_ID}.")
 except Exception as e:
-    print(f"❌ Unable to open spreadsheet by key: {e}")
+    print(f"❌ Unable to open spreadsheet: {e}")
     sys.exit(1)
 
-# ---------------------------
-# تب مقصد و هدرها
-# ---------------------------
+# =========================
+# ابزارها
+# =========================
+def iso(d):
+    if isinstance(d, datetime):
+        return d.date().isoformat()
+    if isinstance(d, date):
+        return d.isoformat()
+    return d
+
+def parse_date_hour(date_raw, hour_raw):
+    """خروجی: (record_dt(datetime) یا None, hour_str یا None)"""
+    record_dt, hour_val = None, None
+    try:
+        # تاریخ
+        if isinstance(date_raw, (int, float)) and date_raw > 30000:
+            base = datetime(1899, 12, 30)
+            record_dt = base + timedelta(days=int(date_raw))
+        elif isinstance(date_raw, str) and date_raw.strip():
+            for fmt in ("%m/%d/%Y", "%B %d, %Y", "%Y-%m-%d"):
+                try:
+                    record_dt = datetime.strptime(date_raw.strip(), fmt)
+                    break
+                except:
+                    pass
+
+        # ساعت
+        if isinstance(hour_raw, (int, float)):
+            if 0 <= int(hour_raw) <= 23:
+                hour_val = str(int(hour_raw))
+            else:
+                base = datetime(1899, 12, 30)
+                dt_val = base + timedelta(days=float(hour_raw))
+                hour_val = str(dt_val.hour)
+        elif isinstance(hour_raw, str) and hour_raw.strip().isdigit():
+            hour_val = hour_raw.strip()
+    except Exception as e:
+        print(f"❌ Error parse_date_hour: {e}")
+    return record_dt, hour_val
+
+def parse_date_only(x):
+    if not x:
+        return None
+    if isinstance(x, (int, float)) and x > 30000:
+        base = datetime(1899, 12, 30)
+        return (base + timedelta(days=int(x))).date()
+    if isinstance(x, str) and x.strip():
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d", "%B %d, %Y"):
+            try:
+                return datetime.strptime(x.strip(), fmt).date()
+            except:
+                continue
+    return None
+
+# درصد به صورت «%»
+def pct(v):
+    return f"{v:.1f}%" if v is not None else ""
+
+# =========================
+# شیت مقصد و Header
+# =========================
 ws = ss.worksheet("All_Data")
 HEADERS = [
-    'full_name', 'task_type', 'quantity', 'date', 'hour', 'occupied_hours', 'order',
-    'performance_without_rotation', 'performance_with_rotation', 'Negative_Minutes',
-    'Ipo_Pack', 'UserName', 'Shift'
+    'full_name','task_type','quantity','date','hour','occupied_hours','order',
+    'performance_without_rotation','performance_with_rotation',
+    'Negative_Minutes','Ipo_Pack','UserName','Shift'
 ]
 
-vals = ws.get_all_values()
-if not vals:
+curr = ws.get_all_values()
+if not curr:
     ws.append_row(HEADERS)
-elif vals[0] != HEADERS:
-    ws.delete_rows(1)
-    ws.insert_row(HEADERS, 1)
+else:
+    if curr[0] != HEADERS:
+        ws.delete_rows(1)
+        ws.insert_row(HEADERS, 1)
 
-# --- کلیدهای موجود برای جلوگیری از تکرار (نسخه کامل) ---
 existing = ws.get_all_values()[1:]
+# کلید کامل برای دی‌داپ کلی
 existing_keys_full = set(
     f"{r[0]}||{r[1]}||{r[2]}||{r[3]}||{r[4]}||{r[5]}||{r[6]}"
     for r in existing
 )
 
-# --- کلیدهای فشرده برای Pick/Presort: (full_name, base_task, date, hour) ---
-def base_task_of(task_type_str: str) -> str:
-    t = (task_type_str or "").strip()
+# کلید فشرده‌ی Pick/Presort بر اساس full_name
+def base_task_of(t):
+    t = (t or "").strip()
     if t.startswith("Pick"):
         return "Pick"
     if t.startswith("Presort"):
@@ -77,318 +135,253 @@ def base_task_of(task_type_str: str) -> str:
 
 existing_keys_compact = set()
 for r in existing:
-    full_name = r[0]
-    task_type = r[1]
-    dt = r[3]
-    hr = r[4]
-    base_t = base_task_of(task_type)
-    if base_t in ("Pick", "Presort"):
-        existing_keys_compact.add(f"{full_name}||{base_t}||{dt}||{hr}")
+    fn = r[0] if len(r)>0 else ""
+    tt = r[1] if len(r)>1 else ""
+    dt = r[3] if len(r)>3 else ""
+    hr = r[4] if len(r)>4 else ""
+    base_t = base_task_of(tt)
+    if base_t in ("Pick","Presort"):
+        existing_keys_compact.add(f"{fn}||{base_t}||{dt}||{hr}")
 
-# ---------------------------
+# =========================
 # KPI_Config
-# ---------------------------
+# =========================
 cfg_ws = ss.worksheet("KPI_Config")
-cfg_data = cfg_ws.get_all_values()
-cfg_headers = cfg_data[0] if cfg_data else []
-
+cfg_vals = cfg_ws.get_all_values()
+cfg_hdr = cfg_vals[0]
 kpi_configs = []
-for row in cfg_data[1:]:
+for row in cfg_vals[1:]:
     try:
         kpi_configs.append({
-            "task_type": row[cfg_headers.index("task_type")],
-            "base": float(row[cfg_headers.index("base")]),
-            "rotation": float(row[cfg_headers.index("rotation")]),
-            "effective": datetime.strptime(row[cfg_headers.index("effective_from")], "%Y-%m-%d")
+            "task_type": row[cfg_hdr.index("task_type")],
+            "base": float(row[cfg_hdr.index("base")]),
+            "rotation": float(row[cfg_hdr.index("rotation")]),
+            "effective": datetime.strptime(row[cfg_hdr.index("effective_from")], "%Y-%m-%d")
         })
-    except Exception:
-        continue
+    except:
+        pass
 
-def getKPI(taskType, recordDate):
-    configs = [c for c in kpi_configs if c["task_type"] == taskType]
-    configs.sort(key=lambda x: x["effective"])
+def getKPI(taskType, record_dt):
+    items = [c for c in kpi_configs if c["task_type"] == taskType]
+    items.sort(key=lambda x: x["effective"])
     chosen = None
-    for cfg in configs:
-        if recordDate >= cfg["effective"]:
-            chosen = cfg
+    for c in items:
+        if record_dt >= c["effective"]:
+            chosen = c
         else:
             break
     return chosen
 
-# ---------------------------
-# پارس تاریخ/ساعت
-# ---------------------------
-def parse_date_hour(date_raw, hour_raw):
-    record_date, hour_val = None, None
-    try:
-        # تاریخ
-        if isinstance(date_raw, (int, float)) and date_raw > 30000:
-            base = datetime(1899, 12, 30)
-            record_date = (base + timedelta(days=int(date_raw)))
-        elif isinstance(date_raw, str) and date_raw:
-            for fmt in ("%m/%d/%Y", "%B %d, %Y", "%Y-%m-%d"):
-                try:
-                    record_date = datetime.strptime(date_raw, fmt)
-                    break
-                except Exception:
-                    pass
-
-        # ساعت
-        if isinstance(hour_raw, (int, float)):
-            if 0 <= int(hour_raw) <= 23:
-                hour_val = int(hour_raw)
-            else:
-                base = datetime(1899, 12, 30)
-                dt_val = base + timedelta(days=float(hour_raw))
-                hour_val = dt_val.hour
-        elif isinstance(hour_raw, str) and hour_raw.isdigit():
-            hour_val = int(hour_raw)
-    except Exception as e:
-        print(f"❌ Error parsing date/hour: {e}")
-
-    return record_date, hour_val
-
-def parse_date_only(x):
-    if not x:
-        return None
-    if isinstance(x, (int, float)) and x > 30000:
-        base = datetime(1899, 12, 30)
-        return (base + timedelta(days=int(x))).date()
-    if isinstance(x, str):
-        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d", "%B %d, %Y"):
-            try:
-                dt = datetime.strptime(x, fmt)
-                return dt.date()
-            except Exception:
-                continue
-    return None
-
-# ---------------------------
-# Other Work: بلاک از تاریخ A به بعد
-# ---------------------------
-other_ws = ss.worksheet("Other Work")
-other_vals = other_ws.get_all_values()
-blocked_from = {}  # name -> date
-
-if other_vals and len(other_vals) > 1:
-    for row in other_vals[1:]:
-        name = (row[2] if len(row) > 2 else "").strip()
-        start_raw = row[0] if len(row) > 0 else ""
+# =========================
+# Other Work → بلوکه از تاریخ A به بعد
+# =========================
+other = ss.worksheet("Other Work").get_all_values()
+blocked_from = {}
+if other and len(other) > 1:
+    for r in other[1:]:
+        name = (r[2] if len(r) > 2 else "").strip()
+        start_raw = r[0] if len(r) > 0 else ""
         if not name:
             continue
-        start_date = parse_date_only(start_raw)
-        if not start_date:
+        sd = parse_date_only(start_raw)
+        if not sd:
             continue
         if name in blocked_from:
-            if start_date < blocked_from[name]:
-                blocked_from[name] = start_date
+            if sd < blocked_from[name]:
+                blocked_from[name] = sd
         else:
-            blocked_from[name] = start_date
+            blocked_from[name] = sd
 
-def is_blocked(full_name: str, rec_dt: datetime) -> bool:
+def is_blocked(full_name, record_dt):
     nm = (full_name or "").strip()
-    if nm in blocked_from and rec_dt is not None:
-        return rec_dt.date() >= blocked_from[nm]
+    if nm in blocked_from and record_dt is not None:
+        return record_dt.date() >= blocked_from[nm]
     return False
 
-# ---------------------------
-# پردازش تب‌های ساده
-# ---------------------------
+# =========================
+# جمع‌آوری
+# =========================
 new_rows = []
 
-simple_sheets = ["Receive", "Locate", "Sort", "Pack", "Stock taking"]
-for sheet_name in simple_sheets:
-    s = ss.worksheet(sheet_name)
-    v = s.get_all_values()
-    if not v or len(v) < 2:
+# تب‌های ساده
+simple_tabs = ["Receive","Locate","Sort","Pack","Stock taking"]
+for tab in simple_tabs:
+    vals = ss.worksheet(tab).get_all_values()
+    if not vals or len(vals) < 2:
         continue
 
-    hdr = v[0]
-    idx = {col.strip(): i for i, col in enumerate(hdr)}
+    hdr = vals[0]
+    idx = {c.strip(): i for i, c in enumerate(hdr)}
 
-    for row in v[1:]:
+    for r in vals[1:]:
         try:
-            full_name = row[idx.get("full_name", -1)]
+            full_name = r[idx.get("full_name",-1)]
             if not full_name:
                 continue
 
-            date_raw = row[idx.get("date", idx.get("Date", -1))]
-            hour_raw = row[idx.get("hour", idx.get("Hour", -1))]
+            date_raw = r[idx.get("date", idx.get("Date",-1))]
+            hour_raw = r[idx.get("hour", idx.get("Hour",-1))]
             record_dt, hour = parse_date_hour(date_raw, hour_raw)
-            if not record_dt or hour is None:
+            if not record_dt or not hour:
                 continue
 
             if is_blocked(full_name, record_dt):
                 continue
 
-            start = row[idx.get("Start", -1)]
-            end = row[idx.get("End", -1)]
-            qty = row[idx.get("Count", idx.get("count", -1))]
-            user = row[idx.get("username", -1)]
-            order = row[idx.get("count_order", -1)] if "count_order" in idx else ""
+            start = r[idx.get("Start",-1)]
+            end   = r[idx.get("End",-1)]
+            qty   = r[idx.get("Count", idx.get("count",-1))]
+            user  = r[idx.get("username",-1)]
+            order = r[idx.get("count_order",-1)] if "count_order" in idx else ""
 
             quantity = float(qty) if qty else 0.0
-            fromMin = float(start) if start else 0.0
-            toMin = float(end) if end else 0.0
-            occupied = int(toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0
+            fromMin  = float(start) if start else 0.0
+            toMin    = float(end) if end else 0.0
+            occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0.0
             if quantity < 15 or occupied <= 0:
                 continue
 
-            if sheet_name == "Receive":
-                center = row[idx.get("warehouse_name", idx.get("warehouses_name", -1))]
+            if tab == "Receive":
+                center = r[idx.get("warehouse_name", idx.get("warehouses_name",-1))]
                 if (center or "").strip() != "مرکز پردازش مهرآباد":
                     continue
 
-            ipo_pack, task_type = 0.0, sheet_name
-            if sheet_name == "Pack":
-                order_val = float(order) if order else 0.0
-                if order_val > 0:
-                    ipo_pack = round(quantity / order_val, 2)
-                task_type = "Pack_Single" if (1.0 <= ipo_pack <= 1.2) else "Pack_Multi"
+            ipo_pack, task_type = "", tab
+            if tab == "Pack":
+                ord_val = float(order) if order else 0.0
+                if ord_val > 0:
+                    ipo_pack = round(quantity / ord_val, 2)
+                task_type = "Pack_Single" if (ipo_pack and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
 
-            # دی‌داپ کامل
-            k_full = f"{full_name}||{task_type}||{record_dt.date()}||{quantity}||{hour}||{occupied}||{order}"
-            if k_full in existing_keys_full:
+            # دی‌داپ کلّی
+            key_full = f"{full_name}||{task_type}||{quantity}||{record_dt.date()}||{hour}||{int(occupied)}||{order or 0}"
+            if key_full in existing_keys_full:
                 continue
-            existing_keys_full.add(k_full)
+            existing_keys_full.add(key_full)
 
-            # KPI
-            perf_wo, perf_w = None, None
+            perf_wo = perf_w = None
             cfg = getKPI(task_type, record_dt)
             if cfg and quantity > 0 and occupied > 0:
-                # برای نمایش درصد، مقدار نسبت را می‌نویسیم (نه ضربدر 100)
-                perf_wo = (quantity / cfg["base"])
-                perf_w = (quantity / (occupied * cfg["rotation"])) if cfg["rotation"] > 0 else None
+                perf_wo = (quantity / cfg["base"]) * 100.0
+                perf_w  = (quantity / (occupied * cfg["rotation"])) * 100.0
 
-            neg_min = max(0, 60 - occupied)
+            neg_min = (60 - occupied) if occupied > 0 else ""
+            if isinstance(neg_min, (int, float)) and neg_min <= 0:
+                neg_min = ""
 
+            # شیفت
             shift = "Other"
             if user:
-                lower = user.lower()
-                if lower.endswith(".s1"):
+                low = user.lower()
+                if low.endswith(".s1"):
                     shift = "Shift1"
-                elif lower.endswith(".s2"):
+                elif low.endswith(".s2"):
                     shift = "Shift2"
-                elif lower.endswith(".flex"):
+                elif low.endswith(".flex"):
                     shift = "Flex"
 
             new_rows.append([
-                full_name, task_type, quantity, record_dt.date(), hour, occupied,
+                full_name, task_type, quantity, iso(record_dt), hour, int(occupied),
                 float(order) if str(order).strip() != "" else 0.0,
-                perf_wo if perf_wo is not None else "",  # درصد به صورت نسبت
-                perf_w if perf_w is not None else "",     # درصد به صورت نسبت
+                pct(perf_wo), pct(perf_w),
                 neg_min, ipo_pack, user, shift
             ])
         except Exception as e:
-            print(f"❌ Error in {sheet_name}: {e}")
+            print(f"❌ Error in {tab}: {e}")
             continue
 
-# ---------------------------
-# Pick & Presort: جفت‌سازی فقط با full_name + date + hour
-# ---------------------------
-pick_rows, presort_rows = [], []
-
-for sheet_name in ["Pick", "Presort"]:
-    s = ss.worksheet(sheet_name)
-    v = s.get_all_values()
-    if not v or len(v) < 2:
-        continue
-
-    hdr = v[0]
-    idx = {col.strip(): i for i, col in enumerate(hdr)}
-
-    for row in v[1:]:
+# Pick & Presort
+def collect_pp(tab):
+    out = []
+    vals = ss.worksheet(tab).get_all_values()
+    if not vals or len(vals) < 2:
+        return out
+    hdr = vals[0]
+    idx = {c.strip(): i for i, c in enumerate(hdr)}
+    for r in vals[1:]:
         try:
-            full_name = row[idx.get("full_name", -1)]
+            full_name = r[idx.get("full_name",-1)]
             if not full_name:
                 continue
-
-            date_raw = row[idx.get("date", idx.get("Date", -1))]
-            hour_raw = row[idx.get("hour", idx.get("Hour", -1))]
+            date_raw = r[idx.get("date", idx.get("Date",-1))]
+            hour_raw = r[idx.get("hour", idx.get("Hour",-1))]
             record_dt, hour = parse_date_hour(date_raw, hour_raw)
-            if not record_dt or hour is None:
+            if not record_dt or not hour:
                 continue
-
             if is_blocked(full_name, record_dt):
                 continue
-
-            start = row[idx.get("Start", -1)]
-            end = row[idx.get("End", -1)]
-            qty = row[idx.get("Count", idx.get("count", -1))]
-            user = row[idx.get("username", -1)]
+            start = r[idx.get("Start",-1)]
+            end   = r[idx.get("End",-1)]
+            qty   = r[idx.get("Count", idx.get("count",-1))]
+            user  = r[idx.get("username",-1)]
 
             quantity = float(qty) if qty else 0.0
-            fromMin = float(start) if start else 0.0
-            toMin = float(end) if end else 0.0
-            occupied = int(toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0
+            fromMin  = float(start) if start else 0.0
+            toMin    = float(end) if end else 0.0
+            occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0.0
             if quantity < 15 or occupied <= 0:
                 continue
 
-            base_data = {
+            out.append({
                 "full_name": full_name,
-                "date": record_dt.date(),
+                "date_dt": record_dt,          # datetime
+                "date": iso(record_dt),        # 'YYYY-MM-DD'
                 "hour": hour,
                 "quantity": quantity,
-                "occupied": occupied,
-                "user": user,
-                "raw_date": record_dt
-            }
-            if sheet_name == "Pick":
-                pick_rows.append(base_data)
-            else:
-                presort_rows.append(base_data)
+                "occupied": int(occupied),
+                "user": user
+            })
         except Exception as e:
-            print(f"❌ Error in {sheet_name}: {e}")
+            print(f"❌ Error in {tab}: {e}")
             continue
+    return out
 
-def compact_key(full_name, base_task, d, h):
-    return f"{full_name}||{base_task}||{d}||{h}"
+pick_rows    = collect_pp("Pick")
+presort_rows = collect_pp("Presort")
+
+# زوج‌ها فقط بر اساس full_name + date + hour
+pairs = {}
+def key_tuple(x): return (x["full_name"], x["date"], x["hour"])
+
+for r in pick_rows:
+    pairs.setdefault(key_tuple(r), {})["pick"] = r
+for r in presort_rows:
+    pairs.setdefault(key_tuple(r), {})["presort"] = r
 
 def append_output_line(base_row, task_type):
-    # دی‌داپ فشرده برای Pick/Presort (بر اساس full_name + base_task + date + hour)
     base_t = "Pick" if task_type.startswith("Pick") else "Presort"
-    ckey = compact_key(base_row["full_name"], base_t, base_row["date"], base_row["hour"])
-    if ckey in existing_keys_compact:
+    compact_key = f"{base_row['full_name']}||{base_t}||{base_row['date']}||{base_row['hour']}"
+    if compact_key in existing_keys_compact:
         return
-    existing_keys_compact.add(ckey)
+    existing_keys_compact.add(compact_key)
 
-    perf_wo, perf_w = None, None
-    cfg = getKPI(task_type, base_row["raw_date"])
+    cfg = getKPI(task_type, base_row["date_dt"])
+    perf_wo = perf_w = None
     if cfg and base_row["quantity"] > 0 and base_row["occupied"] > 0:
-        perf_wo = (base_row["quantity"] / cfg["base"])
-        denom = base_row["occupied"] * cfg["rotation"]
-        perf_w = (base_row["quantity"] / denom) if denom > 0 else None
+        perf_wo = (base_row["quantity"] / cfg["base"]) * 100.0
+        perf_w  = (base_row["quantity"] / (base_row["occupied"] * cfg["rotation"])) * 100.0
 
-    neg_min = max(0, 60 - base_row["occupied"])
+    neg_min = (60 - base_row["occupied"]) if base_row["occupied"] > 0 else ""
+    if isinstance(neg_min, (int, float)) and neg_min <= 0:
+        neg_min = ""
 
+    # شیفت از username
     shift = "Other"
     if base_row["user"]:
-        lower = base_row["user"].lower()
-        if lower.endswith(".s1"):
-            shift = "Shift1"
-        elif lower.endswith(".s2"):
-            shift = "Shift2"
-        elif lower.endswith(".flex"):
-            shift = "Flex"
+        low = base_row["user"].lower()
+        if low.endswith(".s1"):   shift = "Shift1"
+        elif low.endswith(".s2"): shift = "Shift2"
+        elif low.endswith(".flex"): shift = "Flex"
 
     new_rows.append([
         base_row["full_name"], task_type, base_row["quantity"], base_row["date"],
         base_row["hour"], base_row["occupied"], 0.0,
-        perf_wo if perf_wo is not None else "",
-        perf_w if perf_w is not None else "",
+        pct(perf_wo), pct(perf_w),
         neg_min, 0.0, base_row["user"], shift
     ])
 
-# جفت‌سازی با full_name + date + hour
-pairs = {}
-def kkey(r): return (r["full_name"], r["date"], r["hour"])
-for r in pick_rows:
-    pairs.setdefault(kkey(r), {})["pick"] = r
-for r in presort_rows:
-    pairs.setdefault(kkey(r), {})["presort"] = r
-
-# فقط اگر هر دو باشند Large؛ وگرنه همان عنوان عادی
-for key, sides in pairs.items():
+# تصمیم نهایی:
+for (_, _, _), sides in pairs.items():
     p = sides.get("pick")
     s = sides.get("presort")
     if p and s:
@@ -399,75 +392,14 @@ for key, sides in pairs.items():
     elif s:
         append_output_line(s, "Presort")
 
-# ---------------------------
-# درج ردیف‌های جدید
-# ---------------------------
+# =========================
+# درج در شیت
+# =========================
 if new_rows:
-    ws.append_rows(new_rows, value_input_option="RAW")
+    ws.append_rows(new_rows, value_input_option="USER_ENTERED")
     print(f"✅ Added {len(new_rows)} new rows.")
 else:
     print("ℹ️ No new rows to add.")
 
-# ---------------------------
-# فرمت‌دهی ستون‌ها (تاریخ/عدد/درصد)
-# ---------------------------
-def format_all_data(worksheet: gspread.Worksheet):
-    # آخرین ردیف واقعی
-    all_vals = worksheet.get_all_values()
-    last_row = max(2, len(all_vals))  # حداقل تا ردیف 2
-
-    def rng(col):
-        return f"{col}2:{col}{last_row}"
-
-    body = {
-        "requests": [
-            # تاریخ
-            {
-                "repeatCell": {
-                    "range": {"sheetId": worksheet.id, "startRowIndex": 1, "endRowIndex": last_row, "startColumnIndex": 3, "endColumnIndex": 4},
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE"}}},
-                    "fields": "userEnteredFormat.numberFormat"
-                }
-            },
-            # اعداد ساده: C, E, F, G, J
-            *[
-                {
-                    "repeatCell": {
-                        "range": {"sheetId": worksheet.id,
-                                  "startRowIndex": 1, "endRowIndex": last_row,
-                                  "startColumnIndex": c, "endColumnIndex": c+1},
-                        "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
-                        "fields": "userEnteredFormat.numberFormat"
-                    }
-                }
-                for c in [2, 4, 5, 6, 9]  # 0-based indices: C=2, E=4, F=5, G=6, J=9
-            ],
-            # درصد با یک رقم اعشار: H, I
-            *[
-                {
-                    "repeatCell": {
-                        "range": {"sheetId": worksheet.id,
-                                  "startRowIndex": 1, "endRowIndex": last_row,
-                                  "startColumnIndex": c, "endColumnIndex": c+1},
-                        "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}}},
-                        "fields": "userEnteredFormat.numberFormat"
-                    }
-                }
-                for c in [7, 8]  # H=7, I=8
-            ],
-            # Ipo_Pack عدد با دو رقم اعشار: K
-            {
-                "repeatCell": {
-                    "range": {"sheetId": worksheet.id, "startRowIndex": 1, "endRowIndex": last_row, "startColumnIndex": 10, "endColumnIndex": 11},
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.00"}}},
-                    "fields": "userEnteredFormat.numberFormat"
-                }
-            }
-        ]
-    }
-    worksheet.spreadsheet.batch_update(body)
-
-format_all_data(ws)
-print("✅ Formatting applied.")
-
 sys.exit(0)
+
