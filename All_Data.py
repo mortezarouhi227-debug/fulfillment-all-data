@@ -308,7 +308,7 @@ for tab in simple_tabs:
                         ipo_pack = round(quantity / order_val, 2)
                     task_type = "Pack_Single" if (ipo_pack and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
 
-                # KPI و درصدها (به درصد متنی تبدیل می‌شود)
+                # KPI و درصدها
                 perf_without = ""
                 perf_with    = ""
                 cfg = getKPI(task_type, record_date)
@@ -333,16 +333,18 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort: برچسب Large با full_name
+# Pick & Presort: اگر هر دو وجود داشتند ⇒ هر دو *_Larg؛ وگرنه نوع پایه
 # ---------------------------
-pick_rows, presort_rows = [], []
+from collections import defaultdict
+MIN_QTY_OUT = 15  # حداقل مقدار برای ثبت خروجی بعد از تجمیع (در صورت نیاز 0 کنید)
 
-for tab in ["Pick", "Presort"]:
+def _read_tab_rows_for(tab_name):
+    rows = []
     try:
-        ws = ss.worksheet(tab)
+        ws = ss.worksheet(tab_name)
         data = ws.get_all_values()
         if not data or len(data) < 2:
-            continue
+            return rows
         head = data[0]
         idx = {c.strip(): i for i, c in enumerate(head)}
 
@@ -365,85 +367,111 @@ for tab in ["Pick", "Presort"]:
                 qty   = r[idx.get("Count", idx.get("count", -1))]
                 user  = r[idx.get("username", -1)]
 
-                quantity = float(qty) if qty else 0
-                fromMin  = float(start) if start else 0
-                toMin    = float(end)   if end   else 0
-                occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0
-                if quantity < 15 or occupied <= 0:
+                quantity = float(qty) if qty else 0.0
+                fromMin  = float(start) if start else 0.0
+                toMin    = float(end)   if end   else 0.0
+                occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0.0
+
+                # فیلتر کمینه را بعد از تجمیع اعمال می‌کنیم (اینجا فقط حذف رکوردهای معیوب)
+                if quantity <= 0 or occupied <= 0:
                     continue
 
-                base = {
+                rows.append({
                     "full_name": full_name,
-                    "date": norm_date_str(record_date),
-                    "hour": hour,  # عدد
+                    "raw_date": record_date,              # datetime برای KPI
+                    "date": norm_date_str(record_date),   # 'YYYY-MM-DD'
+                    "hour": int(hour),
                     "quantity": quantity,
                     "occupied": occupied,
-                    "user": user,
-                    "raw_date": record_date
-                }
-                if tab == "Pick":
-                    pick_rows.append(base)
-                else:
-                    presort_rows.append(base)
-
+                    "user": user
+                })
             except Exception as e:
-                print(f"❌ Error in {tab}: {e}")
+                print(f"❌ Error in {tab_name}: {e}")
                 continue
     except Exception as e:
-        print(f"❌ Worksheet '{tab}' not found or error: {e}")
+        print(f"❌ Worksheet '{tab_name}' not found or error: {e}")
+    return rows
 
-# ساخت زوج بر اساس full_name + date + hour
-pairs = {}
-def kkey(r): return (r["full_name"], r["date"], norm_num(r["hour"]))
-for r in pick_rows:
-    pairs.setdefault(kkey(r), {})["pick"] = r
-for r in presort_rows:
-    pairs.setdefault(kkey(r), {})["presort"] = r
+def _aggregate_hourly(rows):
+    """تجمیع ساعتی در سطح full_name+date+hour (جمع quantity و occupied)"""
+    agg = defaultdict(lambda: {"qty": 0.0, "occ": 0.0, "user": None, "dt": None})
+    for it in rows:
+        k = (it["full_name"], it["date"], it["hour"])
+        a = agg[k]
+        a["qty"] += it["quantity"]
+        a["occ"] += it["occupied"]
+        a["user"] = it["user"]
+        a["dt"]   = it["raw_date"]
+    return agg
 
-# دِداپ فشرده برای Pick/Presort
-existing_keys_compact = set()
-for (full_name, date_s, hour_s), sides in pairs.items():
-    p = sides.get("pick")
-    s = sides.get("presort")
+def _getKPI_with_fallback(task_type, dt):
+    """اول خود task_type؛ اگر نبود و *_Larg بود، KPI نوع پایه‌اش را بگیر."""
+    cfg = getKPI(task_type, dt)
+    if cfg:
+        return cfg
+    if task_type == "Pick_Larg":
+        return getKPI("Pick", dt)
+    if task_type == "Presort_Larg":
+        return getKPI("Presort", dt)
+    return None
 
-    def add_one(base_row, task_type):
-        compact_key = f"{base_row['full_name']}||{('Pick' if task_type.startswith('Pick') else 'Presort')}||{base_row['date']}||{norm_num(base_row['hour'])}"
-        if compact_key in existing_keys_compact:
-            return
-        existing_keys_compact.add(compact_key)
+def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
+    cfg = _getKPI_with_fallback(task_type, raw_dt)
+    perf_without = ""
+    perf_with    = ""
+    if cfg and qty > 0 and occ > 0:
+        perf_without = (qty / cfg['base']) * 100.0
+        perf_with    = (qty / (occ * cfg['rotation'])) * 100.0
 
-        cfg = getKPI(task_type, base_row["raw_date"])
-        perf_without = perf_with = ""
-        if cfg and base_row["quantity"] > 0 and base_row["occupied"] > 0:
-            perf_without = (base_row["quantity"] / cfg['base']) * 100.0
-            perf_with    = (base_row["quantity"] / (base_row["occupied"] * cfg['rotation'])) * 100.0
-
-        shift = shift_from_username(base_row["user"])
-        row, key = build_output_row(
-            base_row["full_name"], task_type, base_row["quantity"],
-            base_row["raw_date"], base_row["hour"], base_row["occupied"],
-            order_val=0, user=base_row["user"], perf_without=perf_without,
-            perf_with=perf_with, ipo_pack="", shift=shift
-        )
-        if key in existing_keys_full:
-            return
+    shift = shift_from_username(user)
+    row, key = build_output_row(
+        full_name=full_name,
+        task_type=task_type,
+        quantity=qty,
+        record_date=raw_dt,
+        hour=hour_int,
+        occupied=occ,
+        order_val=0,
+        user=user,
+        perf_without=perf_without,
+        perf_with=perf_with,
+        ipo_pack="",
+        shift=shift
+    )
+    if key not in existing_keys_full:
         existing_keys_full.add(key)
         new_rows.append(row)
 
-    # قانون: اگر هر دو وجود دارند → هر دو Large؛ وگرنه هر کدام بود → همان Large
+# خواندن خام و تجمیع
+pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
+presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
+
+# اتحاد کلیدها و خروجی طبق منطق درخواستی
+all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
+
+for (full_name, date_s, hour_int) in all_keys:
+    p = pick_agg.get((full_name, date_s, hour_int))
+    s = presort_agg.get((full_name, date_s, hour_int))
+
     if p and s:
-        add_one(p, "Pick_Larg")
-        add_one(s, "Presort_Larg")
+        # هر دو وجود دارند ⇒ هر دو *_Larg (با مقدار خودشان)
+        if p["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Pick_Larg",    p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+        if s["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
     elif p:
-        add_one(p, "Pick_Larg")
+        # فقط Pick ⇒ Pick
+        if p["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
     elif s:
-        add_one(s, "Presort_Larg")
+        # فقط Presort ⇒ Presort
+        if s["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
 
 # ---------------------------
 # درج نهایی
 # ---------------------------
 if new_rows:
-    # برای جلوگیری از مشکل json (date) همه چیز از قبل string/number شده است.
     ws_all.append_rows(new_rows, value_input_option="RAW")
     print(f"✅ Added {len(new_rows)} new rows.")
 else:
