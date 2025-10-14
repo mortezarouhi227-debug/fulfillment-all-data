@@ -2,4 +2,5 @@ gspread
 google-auth
 google-auth-oauthlib
 Flask
-gspread-formatting
+gunicorn
+requests
