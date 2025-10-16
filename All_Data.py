@@ -20,9 +20,9 @@ except:
     MIN_QTY_OUT = 15
 
 try:
-    LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.30"))  # ±30%
+    LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.60"))  # ±60%
 except:
-    LARG_MATCH_PCT = 0.30
+    LARG_MATCH_PCT = 0.60
 
 # =========================
 # اتصال
