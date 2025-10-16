@@ -1,4 +1,3 @@
-
 # All_Data.py
 import os, json, sys
 from datetime import datetime, timedelta
@@ -17,11 +16,18 @@ SPREADSHEET_ID = os.getenv(
     "SPREADSHEET_ID",
     "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
+
 # حداقل مقدار برای ثبت خروجی‌های تجمیعی Pick/Presort
 try:
     MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
 except:
     MIN_QTY_OUT = 15
+
+# درصد بازه برای تشخیص *_Larg در منطق درصدی (پیش‌فرض ±30%)
+try:
+    LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.30"))
+except:
+    LARG_MATCH_PCT = 0.30
 
 # ---------------------------
 # اتصال
@@ -49,25 +55,21 @@ except Exception as e:
     sys.exit(1)
 
 # ---------------------------
-# Helper: نرمال‌سازی برای کلید یکتا
+# Helpers
 # ---------------------------
 def norm_str(x):
     return "" if x is None else str(x).strip()
 
 def norm_num(x):
-    """ورودی عددی/رشته‌ای را به رشتهٔ عددی پایدار تبدیل می‌کند (بدون .0)"""
     if x is None or x == "":
         return ""
     try:
         f = float(x)
-        if f.is_integer():
-            return str(int(f))
-        return f"{f:.10g}"
+        return str(int(f)) if f.is_integer() else f"{f:.10g}"
     except:
         return norm_str(x)
 
 def norm_date_str(dt):
-    """datetime/date/str -> 'YYYY-MM-DD'"""
     if dt is None or dt == "":
         return ""
     if hasattr(dt, "strftime"):
@@ -80,32 +82,29 @@ def norm_date_str(dt):
             pass
     return s
 
-# ---------------------------
-# تاریخ/ساعت‌خوان
-# ---------------------------
+def _parse_excel_serial(val):
+    return datetime(1899, 12, 30) + timedelta(days=float(val))
+
 def parse_date_hour(date_raw, hour_raw):
     record_date, hour_val = None, None
     try:
         # تاریخ
-        if isinstance(date_raw, (int, float)) and date_raw > 30000:
-            base = datetime(1899, 12, 30)
-            record_date = base + timedelta(days=int(date_raw))
+        if isinstance(date_raw, (int, float)) and float(date_raw) > 30000:
+            record_date = _parse_excel_serial(date_raw)
         elif isinstance(date_raw, str) and date_raw:
-            for fmt in ("%m/%d/%Y", "%B %d, %Y", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S"):
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
                 try:
                     record_date = datetime.strptime(date_raw.strip(), fmt)
                     break
                 except:
-                    pass
-
+                    continue
         # ساعت
         if isinstance(hour_raw, (int, float)):
-            if 0 <= int(hour_raw) <= 23:
-                hour_val = int(hour_raw)
+            f = float(hour_raw)
+            if 0 <= int(f) <= 23:
+                hour_val = int(f)
             else:
-                base = datetime(1899, 12, 30)
-                dt_val = base + timedelta(days=float(hour_raw))
-                hour_val = dt_val.hour
+                hour_val = _parse_excel_serial(f).hour
         elif isinstance(hour_raw, str) and hour_raw.strip():
             s = hour_raw.strip()
             if s.isdigit():
@@ -114,23 +113,20 @@ def parse_date_hour(date_raw, hour_raw):
                     hour_val = v
             else:
                 try:
-                    base = datetime(1899, 12, 30)
-                    hour_val = (base + timedelta(days=float(s))).hour
+                    hour_val = _parse_excel_serial(float(s)).hour
                 except:
                     pass
     except Exception as e:
         print(f"❌ Error parsing date/hour: {e}")
-
     return record_date, hour_val
 
 def parse_date_only(x):
     if not x:
         return None
-    if isinstance(x, (int, float)) and x > 30000:
-        base = datetime(1899, 12, 30)
-        return (base + timedelta(days=float(x))).date()
+    if isinstance(x, (int, float)) and float(x) > 30000:
+        return _parse_excel_serial(x).date()
     if isinstance(x, str):
-        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d", "%B %d, %Y"):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
             try:
                 return datetime.strptime(x.strip(), fmt).date()
             except:
@@ -138,14 +134,25 @@ def parse_date_only(x):
         try:
             f = float(x)
             if f > 30000:
-                base = datetime(1899, 12, 30)
-                return (base + timedelta(days=f)).date()
+                return _parse_excel_serial(f).date()
         except:
             pass
     return None
 
+def shift_from_username(user):
+    s = "Other"
+    if user:
+        lower = user.lower().strip()
+        if lower.endswith(".s1"):
+            s = "Shift1"
+        elif lower.endswith(".s2"):
+            s = "Shift2"
+        elif lower.endswith(".flex"):
+            s = "Flex"
+    return s
+
 # ---------------------------
-# شیت‌ها
+# Sheets
 # ---------------------------
 ws_all   = ss.worksheet("All_Data")
 ws_cfg   = ss.worksheet("KPI_Config")
@@ -171,12 +178,9 @@ else:
         ws_all.insert_row(HEADERS, 1)
         vals_all = ws_all.get_all_values()
 
-# ---------------------------
-# کلیدهای موجود (با نرمال‌سازی پایدار)
-# ---------------------------
-existing = vals_all[1:]
+# جلوگیری از تکرار
 existing_keys_full = set()
-for r in existing:
+for r in vals_all[1:]:
     full_name = norm_str(r[0] if len(r)>0 else "")
     task_type = norm_str(r[1] if len(r)>1 else "")
     qty       = norm_num(r[2] if len(r)>2 else "")
@@ -187,7 +191,7 @@ for r in existing:
     existing_keys_full.add(f"{full_name}||{task_type}||{dt}||{qty}||{hr}||{occ}||{ordv}")
 
 # ---------------------------
-# KPI config
+# KPI Config (+ fallback)
 # ---------------------------
 cfg_data = ws_cfg.get_all_values()
 cfg_headers = cfg_data[0] if cfg_data else []
@@ -214,19 +218,18 @@ def getKPI(taskType, recordDate):
             break
     return chosen
 
-def getKPI_with_fallback(task_type, dt):
-    """اگر برای *_Larg در KPI_Config ردیف نیست، KPI نوع پایه‌اش استفاده شود."""
-    cfg = getKPI(task_type, dt)
+def getKPI_with_fallback(task_type, recordDate):
+    cfg = getKPI(task_type, recordDate)
     if cfg:
         return cfg
     if task_type == "Pick_Larg":
-        return getKPI("Pick", dt)
+        return getKPI("Pick", recordDate)
     if task_type == "Presort_Larg":
-        return getKPI("Presort", dt)
+        return getKPI("Presort", recordDate)
     return None
 
 # ---------------------------
-# Other Work: بلاک از تاریخ A به بعد
+# Other Work (Blocked)
 # ---------------------------
 other = ws_other.get_all_values()
 blocked_from = {}
@@ -252,25 +255,18 @@ def is_blocked(full_name: str, rec_dt: datetime) -> bool:
     return False
 
 # ---------------------------
-# Utility: ساخت ردیف خروجی + کلید یکتا
+# Utility: ساخت ردیف خروجی
 # ---------------------------
 def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
                      order_val, user, perf_without, perf_with, ipo_pack, shift):
-    """مقادیر را به فرم نهایی (رشته/درصد/عدد) تبدیل می‌کند و کلید یکتا را برمی‌گرداند."""
     dt_s  = norm_date_str(record_date)
     qty_s = norm_num(quantity)
     hr_s  = norm_num(hour)
     occ_s = norm_num(occupied)
-
-    # order فقط برای Pack_* پر می‌شود
     ord_s = norm_num(order_val) if str(task_type).startswith("Pack") else ""
-
-    # درصدها را به صورت '95.5%' بنویسیم
-    perf_wo_s = (f"{perf_without:.1f}%" if isinstance(perf_without, (int, float)) else norm_str(perf_without))
-    perf_wi_s = (f"{perf_with:.1f}%"    if isinstance(perf_with,    (int, float)) else norm_str(perf_with))
-
+    perf_wo_s = f"{perf_without:.1f}%" if isinstance(perf_without, (int,float)) else ""
+    perf_wi_s = f"{perf_with:.1f}%" if isinstance(perf_with, (int,float)) else ""
     neg_min = (60 - occupied) if (occupied and 0 < occupied < 60) else ""
-
     row = [
         norm_str(full_name), norm_str(task_type), qty_s, dt_s, hr_s, occ_s, ord_s,
         perf_wo_s, perf_wi_s, norm_num(neg_min), norm_num(ipo_pack), norm_str(user), norm_str(shift)
@@ -278,20 +274,21 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     key_full = f"{row[0]}||{row[1]}||{row[3]}||{row[2]}||{row[4]}||{row[5]}||{row[6]}"
     return row, key_full
 
-def shift_from_username(user):
-    s = "Other"
-    if user:
-        lower = user.lower().strip()
-        if lower.endswith(".s1"):
-            s = "Shift1"
-        elif lower.endswith(".s2"):
-            s = "Shift2"
-        elif lower.endswith(".flex"):
-            s = "Flex"
-    return s
+def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
+    cfg = getKPI_with_fallback(task_type, raw_dt)
+    perf_without = perf_with = ""
+    if cfg and qty > 0 and occ > 0:
+        perf_without = (qty / cfg['base']) * 100.0
+        perf_with    = (qty / (occ * cfg['rotation'])) * 100.0
+    shift = shift_from_username(user)
+    row, key = build_output_row(full_name, task_type, qty, raw_dt, hour_int, occ,
+                                0, user, perf_without, perf_with, "", shift)
+    if key not in existing_keys_full:
+        existing_keys_full.add(key)
+        new_rows.append(row)
 
 # ---------------------------
-# پردازش تب‌های ساده
+# تب‌های ساده
 # ---------------------------
 new_rows = []
 
@@ -332,13 +329,11 @@ for tab in simple_tabs:
                 if quantity < 15 or occupied <= 0:
                     continue
 
-                # فیلتر Receive (مرکز مهرآباد)
                 if tab == "Receive":
                     center = r[idx.get("warehouse_name", idx.get("warehouses_name", -1))]
                     if (center or "").strip() != "مرکز پردازش مهرآباد":
                         continue
 
-                # Pack: محاسبه ipo_pack + تشخیص Single/Multi
                 ipo_pack, task_type = "", tab
                 order_val = 0
                 if tab == "Pack":
@@ -347,9 +342,7 @@ for tab in simple_tabs:
                         ipo_pack = round(quantity / order_val, 2)
                     task_type = "Pack_Single" if (ipo_pack and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
 
-                # KPI و درصدها
-                perf_without = ""
-                perf_with    = ""
+                perf_without = perf_with = ""
                 cfg = getKPI(task_type, record_date)
                 if cfg and quantity > 0 and occupied > 0:
                     perf_without = (quantity / cfg['base']) * 100.0
@@ -364,7 +357,6 @@ for tab in simple_tabs:
                     continue
                 existing_keys_full.add(key)
                 new_rows.append(row)
-
             except Exception as e:
                 print(f"❌ Error in {tab}: {e}")
                 continue
@@ -372,7 +364,7 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort + Larg_Overrides
+# Pick & Presort + Larg_Overrides + منطق درصدی
 # ---------------------------
 def _read_tab_rows_for(tab_name):
     rows = []
@@ -428,7 +420,6 @@ def _read_tab_rows_for(tab_name):
     return rows
 
 def _aggregate_hourly(rows):
-    """تجمیع ساعتی در سطح full_name+date+hour (جمع quantity و occupied)"""
     agg = defaultdict(lambda: {"qty": 0.0, "occ": 0.0, "user": None, "dt": None})
     for it in rows:
         k = (it["full_name"], it["date"], it["hour"])
@@ -439,45 +430,7 @@ def _aggregate_hourly(rows):
         a["dt"]   = it["raw_date"]
     return agg
 
-def _getKPI_with_fallback(task_type, dt):
-    cfg = getKPI(task_type, dt)
-    if cfg:
-        return cfg
-    if task_type == "Pick_Larg":
-        return getKPI("Pick", dt)
-    if task_type == "Presort_Larg":
-        return getKPI("Presort", dt)
-    return None
-
-def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
-    cfg = _getKPI_with_fallback(task_type, raw_dt)
-    perf_without = ""
-    perf_with    = ""
-    if cfg and qty > 0 and occ > 0:
-        perf_without = (qty / cfg['base']) * 100.0
-        perf_with    = (qty / (occ * cfg['rotation'])) * 100.0
-
-    shift = shift_from_username(user)
-    row, key = build_output_row(
-        full_name=full_name,
-        task_type=task_type,
-        quantity=qty,
-        record_date=raw_dt,
-        hour=hour_int,
-        occupied=occ,
-        order_val=0,
-        user=user,
-        perf_without=perf_without,
-        perf_with=perf_with,
-        ipo_pack="",
-        shift=shift
-    )
-    if key not in existing_keys_full:
-        existing_keys_full.add(key)
-        new_rows.append(row)
-
 def _read_overrides(ws):
-    """خواندن تب Larg_Overrides ⇒ مجموعه‌ای از (name, date_str, hour_int)"""
     force = set()
     if not ws:
         return force
@@ -491,7 +444,6 @@ def _read_overrides(ws):
                 continue
             dt, hr = parse_date_hour(date_raw, hour_raw)
             if not dt or hr is None:
-                # تلاش جایگزین
                 d_only = parse_date_only(date_raw)
                 if d_only is None:
                     continue
@@ -507,25 +459,55 @@ def _read_overrides(ws):
         print(f"❌ Error reading Larg_Overrides: {e}")
     return force
 
-# خواندن خام و تجمیع
+# خواندن و تجمیع
 pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
 presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
 force_larg  = _read_overrides(ws_override)
 
-# خروجی: بدون شرط «هر دو ⇒ *_Larg»
+# ترتیب اعمال:
+# 1) اگر (name,date,hour) در Larg_Overrides بود ⇒ همان بازه را *_Larg می‌زنیم.
+# 2) در غیر اینصورت، اگر هر دو لاگ دارند و Presort در ±LARG_MATCH_PCT نسبت به Pick بود ⇒ هر دو *_Larg، وگرنه عادی.
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
+
 for (full_name, date_s, hour_int) in all_keys:
+    p = pick_agg.get((full_name, date_s, hour_int))
+    s = presort_agg.get((full_name, date_s, hour_int))
+
     in_force = (norm_str(full_name), date_s, int(hour_int)) in force_larg
 
-    p = pick_agg.get((full_name, date_s, hour_int))
-    if p and p["qty"] >= MIN_QTY_OUT:
-        _emit_row(full_name, "Pick_Larg" if in_force else "Pick",
-                  p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+    if in_force:
+        # فقط اجبار را اعمال می‌کنیم؛ منطق درصدی اجرا نمی‌شود
+        if p and p["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+        if s and s["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+        continue  # شرط دوم را اجرا نکن
 
-    s = presort_agg.get((full_name, date_s, hour_int))
-    if s and s["qty"] >= MIN_QTY_OUT:
-        _emit_row(full_name, "Presort_Larg" if in_force else "Presort",
-                  s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+    # اگر اجبار نبود، منطق درصدی
+    if p and s:
+        p_qty, s_qty = p["qty"], s["qty"]
+        if p_qty > 0:
+            low, high = p_qty * (1 - LARG_MATCH_PCT), p_qty * (1 + LARG_MATCH_PCT)
+            within = (low <= s_qty <= high)
+        else:
+            within = False
+
+        if within:
+            if p_qty >= MIN_QTY_OUT:
+                _emit_row(full_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+            if s_qty >= MIN_QTY_OUT:
+                _emit_row(full_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+        else:
+            if p_qty >= MIN_QTY_OUT:
+                _emit_row(full_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+            if s_qty >= MIN_QTY_OUT:
+                _emit_row(full_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+    elif p:
+        if p["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+    elif s:
+        if s["qty"] >= MIN_QTY_OUT:
+            _emit_row(full_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
 
 # ---------------------------
 # درج نهایی
