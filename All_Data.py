@@ -14,15 +14,11 @@ SCOPES = [
 ]
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes")
 
+# حداقل مقدار خروجی
 try:
     MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
 except:
     MIN_QTY_OUT = 15
-
-try:
-    LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.60"))  # ±60%
-except:
-    LARG_MATCH_PCT = 0.60
 
 # =========================
 # اتصال
@@ -79,29 +75,60 @@ def norm_date_str(dt):
             pass
     return s
 
+def _parse_excel_serial(val):
+    return datetime(1899, 12, 30) + timedelta(days=float(val))
+
 def parse_date_hour(date_raw, hour_raw):
     record_date, hour_val = None, None
     try:
-        if isinstance(date_raw, (int, float)) and date_raw > 30000:
-            record_date = datetime(1899, 12, 30) + timedelta(days=int(date_raw))
+        # تاریخ
+        if isinstance(date_raw, (int, float)) and float(date_raw) > 30000:
+            record_date = _parse_excel_serial(date_raw)
         elif isinstance(date_raw, str) and date_raw:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y"):
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
                 try:
-                    record_date = datetime.strptime(date_raw, fmt)
+                    record_date = datetime.strptime(date_raw.strip(), fmt)
                     break
                 except:
                     continue
+        # ساعت
         if isinstance(hour_raw, (int, float)):
-            if 0 <= int(hour_raw) <= 23:
-                hour_val = int(hour_raw)
+            f = float(hour_raw)
+            if 0 <= int(f) <= 23:
+                hour_val = int(f)
             else:
-                dt_val = datetime(1899, 12, 30) + timedelta(days=float(hour_raw))
-                hour_val = dt_val.hour
-        elif isinstance(hour_raw, str) and hour_raw.strip().isdigit():
-            hour_val = int(hour_raw.strip())
+                hour_val = _parse_excel_serial(f).hour
+        elif isinstance(hour_raw, str) and hour_raw.strip():
+            s = hour_raw.strip()
+            if s.isdigit():
+                v = int(s);  hour_val = v if 0 <= v <= 23 else None
+            else:
+                try:
+                    hour_val = _parse_excel_serial(float(s)).hour
+                except:
+                    pass
     except:
         pass
     return record_date, hour_val
+
+def parse_date_only(x):
+    if not x:
+        return None
+    if isinstance(x, (int, float)) and float(x) > 30000:
+        return _parse_excel_serial(x).date()
+    if isinstance(x, str):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
+            try:
+                return datetime.strptime(x.strip(), fmt).date()
+            except:
+                continue
+        try:
+            f = float(x)
+            if f > 30000:
+                return _parse_excel_serial(f).date()
+        except:
+            pass
+    return None
 
 def shift_from_username(user):
     s = "Other"
@@ -121,6 +148,11 @@ def shift_from_username(user):
 ws_all   = ss.worksheet("All_Data")
 ws_cfg   = ss.worksheet("KPI_Config")
 ws_other = ss.worksheet("Other Work")
+# تب جدید برای اجبار Larg
+try:
+    ws_override = ss.worksheet("Larg_Overrides")
+except:
+    ws_override = None  # اگر وجود نداشت، خروجی‌ها عادی خواهد بود
 
 HEADERS = [
     'full_name','task_type','quantity','date','hour','occupied_hours','order',
@@ -137,6 +169,9 @@ elif vals_all[0] != HEADERS:
     ws_all.insert_row(HEADERS, 1)
     vals_all = ws_all.get_all_values()
 
+# =========================
+# جلوگیری از تکرار
+# =========================
 existing_keys_full = set()
 for r in vals_all[1:]:
     full_name = norm_str(r[0] if len(r)>0 else "")
@@ -149,7 +184,7 @@ for r in vals_all[1:]:
     existing_keys_full.add(f"{full_name}||{task_type}||{dt}||{qty}||{hr}||{occ}||{ordv}")
 
 # =========================
-# KPI Config
+# KPI Config + fallback
 # =========================
 cfg_data = ws_cfg.get_all_values()
 cfg_headers = cfg_data[0] if cfg_data else []
@@ -176,6 +211,16 @@ def getKPI(taskType, recordDate):
             break
     return chosen
 
+def getKPI_with_fallback(task_type, recordDate):
+    cfg = getKPI(task_type, recordDate)
+    if cfg:
+        return cfg
+    if task_type == "Pick_Larg":
+        return getKPI("Pick", recordDate)
+    if task_type == "Presort_Larg":
+        return getKPI("Presort", recordDate)
+    return None
+
 # =========================
 # Other Work (Blocked Users)
 # =========================
@@ -187,11 +232,10 @@ if other and len(other) > 1:
         start_raw = row[0] if len(row) > 0 else ""
         if not name:
             continue
-        try:
-            start_date = datetime.strptime(start_raw, "%Y-%m-%d").date()
-        except:
+        start_date = parse_date_only(start_raw)
+        if not start_date:
             continue
-        blocked_from[name] = start_date
+        blocked_from[name] = min(blocked_from.get(name, start_date), start_date) if name in blocked_from else start_date
 
 def is_blocked(full_name: str, rec_dt: datetime) -> bool:
     nm = (full_name or "").strip()
@@ -200,7 +244,7 @@ def is_blocked(full_name: str, rec_dt: datetime) -> bool:
     return False
 
 # =========================
-# Utility: Build Output Row
+# Utility: ساخت ردیف خروجی + کلید
 # =========================
 def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
                      order_val, user, perf_without, perf_with, ipo_pack, shift):
@@ -220,11 +264,11 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     return row, key_full
 
 def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
-    cfg = getKPI(task_type, raw_dt)
+    cfg = getKPI_with_fallback(task_type, raw_dt)
     perf_without = perf_with = ""
     if cfg and qty > 0 and occ > 0:
         perf_without = (qty / cfg['base']) * 100.0
-        perf_with = (qty / (occ * cfg['rotation'])) * 100.0
+        perf_with    = (qty / (occ * cfg['rotation'])) * 100.0
     shift = shift_from_username(user)
     row, key = build_output_row(full_name, task_type, qty, raw_dt, hour_int, occ,
                                 0, user, perf_without, perf_with, "", shift)
@@ -233,7 +277,7 @@ def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
         new_rows.append(row)
 
 # =========================
-# Read Tabs
+# خواندن تب‌های Pick/Presort
 # =========================
 def read_tab(tab_name):
     rows = []
@@ -255,13 +299,13 @@ def read_tab(tab_name):
                 if not record_date or hour is None or is_blocked(full_name, record_date):
                     continue
                 start = r[idx.get("Start", -1)]
-                end = r[idx.get("End", -1)]
-                qty = r[idx.get("Count", idx.get("count", -1))]
-                user = r[idx.get("username", -1)]
+                end   = r[idx.get("End", -1)]
+                qty   = r[idx.get("Count", idx.get("count", -1))]
+                user  = r[idx.get("username", -1)]
                 try:
                     quantity = float(qty)
-                    fromMin = float(start)
-                    toMin = float(end)
+                    fromMin  = float(start)
+                    toMin    = float(end)
                 except:
                     continue
                 occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0
@@ -290,46 +334,75 @@ def aggregate_hourly(rows):
         a["qty"] += it["quantity"]
         a["occ"] += it["occupied"]
         a["user"] = it["user"]
-        a["dt"] = it["raw_date"]
+        a["dt"]   = it["raw_date"]
     return agg
+
+# =========================
+# خواندن تب Larg_Overrides (A:date, B:hour, C:full_name)
+# =========================
+def read_overrides(ws):
+    force_larg = set()
+    if not ws:
+        return force_larg
+    try:
+        data = ws.get_all_values()
+        for i, r in enumerate(data):
+            if len(r) < 3:
+                continue
+            date_raw, hour_raw, name_raw = r[0], r[1], r[2]
+            if not name_raw:
+                continue
+            # تلاش برای پارس تاریخ/ساعت
+            dt_obj, hr = parse_date_hour(date_raw, hour_raw)
+            if not dt_obj or hr is None:
+                # تلاش جایگزین: فقط تاریخ
+                d_only = parse_date_only(date_raw)
+                if d_only is None:
+                    continue
+                # اگر ساعت فقط عدد رشته‌ای بود
+                try:
+                    h_int = int(str(hour_raw).strip())
+                    if 0 <= h_int <= 23:
+                        hr = h_int
+                    else:
+                        continue
+                    # تاریخ را به datetime برای نرمال‌سازی تبدیل می‌کنیم
+                    dt_obj = datetime(d_only.year, d_only.month, d_only.day)
+                except:
+                    continue
+            key = (norm_str(name_raw), norm_date_str(dt_obj), int(hr))
+            force_larg.add(key)
+    except Exception as e:
+        print(f"❌ Error reading Larg_Overrides: {e}")
+    return force_larg
 
 # =========================
 # پردازش
 # =========================
 new_rows = []
 
-pick_agg = aggregate_hourly(read_tab("Pick"))
+pick_agg    = aggregate_hourly(read_tab("Pick"))
 presort_agg = aggregate_hourly(read_tab("Presort"))
+force_larg  = read_overrides(ws_override)
+
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
 
 for (full_name, date_s, hour_int) in all_keys:
     p = pick_agg.get((full_name, date_s, hour_int))
     s = presort_agg.get((full_name, date_s, hour_int))
-    if p and s:
-        p_qty, s_qty = p["qty"], s["qty"]
-        if p_qty > 0:
-            low, high = p_qty * (1 - LARG_MATCH_PCT), p_qty * (1 + LARG_MATCH_PCT)
-            within_range = low <= s_qty <= high
-        else:
-            within_range = False
 
-        if within_range:
-            if p_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Pick_Larg", p_qty, p["occ"], p["user"], p["dt"], hour_int)
-            if s_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Presort_Larg", s_qty, s["occ"], s["user"], s["dt"], hour_int)
-        else:
-            if p_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Pick", p_qty, p["occ"], p["user"], p["dt"], hour_int)
-            if s_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Presort", s_qty, s["occ"], s["user"], s["dt"], hour_int)
+    # آیا این شخص/تاریخ/ساعت در تب Larg_Overrides آمده؟
+    in_force = (norm_str(full_name), date_s, int(hour_int)) in force_larg
 
-    elif p:
+    if p:
+        task = "Pick_Larg" if in_force else "Pick"
         if p["qty"] >= MIN_QTY_OUT:
-            _emit_row(full_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
-    elif s:
+            _emit_row(full_name, task, p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+
+    if s:
+        task = "Presort_Larg" if in_force else "Presort"
         if s["qty"] >= MIN_QTY_OUT:
-            _emit_row(full_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+            _emit_row(full_name, task, s["qty"], s["occ"], s["user"], s["dt"], hour_int)
 
 # =========================
 # درج نهایی
