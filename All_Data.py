@@ -1,5 +1,6 @@
-# All_Data.py
-import os, json, sys
+# All_Data.py (final)
+# -*- coding: utf-8 -*-
+import os, json, sys, re, unicodedata
 from datetime import datetime, timedelta
 from collections import defaultdict
 import gspread
@@ -17,7 +18,7 @@ SPREADSHEET_ID = os.getenv(
     "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
 
-# حداقل مقدار برای ثبت خروجی‌های تجمیعی Pick/Presort
+# حداقل مقدار برای ثبت خروجی‌های تجمیعی Pick/Presort و تب‌های ساده
 try:
     MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
 except:
@@ -28,6 +29,10 @@ try:
     LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.30"))
 except:
     LARG_MATCH_PCT = 0.30
+
+# اگر True باشد، performance را به صورت "xx.x%" رشته‌ای ذخیره می‌کند؛
+# اگر False باشد، مقدار عددی (مثلا 87.5) ذخیره می‌شود.
+PERF_AS_PERCENT = os.getenv("PERF_AS_PERCENT", "false").lower() in ("1","true","yes")
 
 # ---------------------------
 # اتصال
@@ -139,6 +144,21 @@ def parse_date_only(x):
             pass
     return None
 
+def norm_name(s: str) -> str:
+    """نام فارسی را یکتا می‌کند: ی/ک عربی→فارسی، حذف نیم‌فاصله/RTL، فشرده‌سازی فاصله‌ها، NFKC"""
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKC", s)
+    # یکسان‌سازی حروف عربی/فارسی
+    s = s.replace("ي", "ی").replace("ى", "ی").replace("ې", "ی")
+    s = s.replace("ك", "ک")
+    # حذف کنترل‌کاراکترها و نیم‌فاصله/RTL marks
+    s = s.replace("\u200c", " ").replace("\u200f", "").replace("\u202b", "")
+    # فشرده‌سازی فاصله‌ها
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 def shift_from_username(user):
     s = "Other"
     if user:
@@ -178,17 +198,17 @@ else:
         ws_all.insert_row(HEADERS, 1)
         vals_all = ws_all.get_all_values()
 
-# جلوگیری از تکرار
-existing_keys_full = set()
+# ---------------------------
+# جلوگیری از تکرار (کلید یکتا: norm_name + task + date + hour)
+# ---------------------------
+existing_keys_hour = set()
 for r in vals_all[1:]:
-    full_name = norm_str(r[0] if len(r)>0 else "")
-    task_type = norm_str(r[1] if len(r)>1 else "")
-    qty       = norm_num(r[2] if len(r)>2 else "")
+    full_name = norm_name(r[0] if len(r)>0 else "")
+    task_type = norm_str(r[1] if len(r)>1 else "").strip()
     dt        = norm_date_str(r[3] if len(r)>3 else "")
-    hr        = norm_num(r[4] if len(r)>4 else "")
-    occ       = norm_num(r[5] if len(r)>5 else "")
-    ordv      = norm_num(r[6] if len(r)>6 else "")
-    existing_keys_full.add(f"{full_name}||{task_type}||{dt}||{qty}||{hr}||{occ}||{ordv}")
+    hr_raw    = r[4] if len(r)>4 else ""
+    hr        = norm_num(hr_raw)
+    existing_keys_hour.add(f"{full_name}||{task_type}||{dt}||{hr}")
 
 # ---------------------------
 # KPI Config (+ fallback)
@@ -229,34 +249,51 @@ def getKPI_with_fallback(task_type, recordDate):
     return None
 
 # ---------------------------
-# Other Work (Blocked)
+# Other Work (Blocked) — فقط همان تاریخ و همان ساعت
 # ---------------------------
 other = ws_other.get_all_values()
-blocked_from = {}
+blocked_exact = set()  # (norm_name, 'YYYY-MM-DD', hour)
 if other and len(other) > 1:
     for row in other[1:]:
-        name = (row[2] if len(row) > 2 else "").strip()
-        start_raw = row[0] if len(row) > 0 else ""
+        name = norm_str(row[2] if len(row) > 2 else "")
         if not name:
             continue
-        start_date = parse_date_only(start_raw)
-        if not start_date:
-            continue
-        if name in blocked_from:
-            if start_date < blocked_from[name]:
-                blocked_from[name] = start_date
+        ts_raw = row[0] if len(row) > 0 else ""
+        # اگر ستون B ساعت جدا داشته باشد، همان را در نظر می‌گیریم
+        hr_col = row[1] if len(row) > 1 else ""
+        dth, hrh = parse_date_hour(ts_raw, hr_col)
+        if dth and hrh is not None:
+            blocked_exact.add((norm_name(name), norm_date_str(dth), int(hrh)))
         else:
-            blocked_from[name] = start_date
+            d_only = parse_date_only(ts_raw)
+            if d_only is not None and isinstance(hr_col, (int,float,str)) and str(hr_col).strip() != "":
+                try:
+                    h = int(float(str(hr_col).strip()))
+                    if 0 <= h <= 23:
+                        blocked_exact.add((norm_name(name), d_only.strftime("%Y-%m-%d"), h))
+                except:
+                    pass
 
-def is_blocked(full_name: str, rec_dt: datetime) -> bool:
-    nm = (full_name or "").strip()
-    if nm in blocked_from and rec_dt is not None:
-        return rec_dt.date() >= blocked_from[nm]
-    return False
+def is_blocked(full_name: str, rec_dt: datetime, hour: int) -> bool:
+    if rec_dt is None or hour is None:
+        return False
+    return (norm_name(full_name), norm_date_str(rec_dt), int(hour)) in blocked_exact
 
 # ---------------------------
 # Utility: ساخت ردیف خروجی
 # ---------------------------
+def _perf_to_cell(x):
+    """اگر PERF_AS_PERCENT True باشد رشته 'xx.x%'، در غیر این صورت عدد (float)"""
+    if x == "" or x is None:
+        return ""
+    try:
+        f = float(x)
+    except:
+        return ""
+    if PERF_AS_PERCENT:
+        return f"{f:.1f}%"
+    return float(f"{f:.1f}")  # عدد یک‌رقم اعشار
+
 def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
                      order_val, user, perf_without, perf_with, ipo_pack, shift):
     dt_s  = norm_date_str(record_date)
@@ -264,15 +301,17 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     hr_s  = norm_num(hour)
     occ_s = norm_num(occupied)
     ord_s = norm_num(order_val) if str(task_type).startswith("Pack") else ""
-    perf_wo_s = f"{perf_without:.1f}%" if isinstance(perf_without, (int,float)) else ""
-    perf_wi_s = f"{perf_with:.1f}%" if isinstance(perf_with, (int,float)) else ""
+    perf_wo_cell = _perf_to_cell(perf_without)
+    perf_wi_cell = _perf_to_cell(perf_with)
+    # occupied بر دقیقه؛ Negative_Minutes = 60 - occupied
     neg_min = (60 - occupied) if (occupied and 0 < occupied < 60) else ""
     row = [
         norm_str(full_name), norm_str(task_type), qty_s, dt_s, hr_s, occ_s, ord_s,
-        perf_wo_s, perf_wi_s, norm_num(neg_min), norm_num(ipo_pack), norm_str(user), norm_str(shift)
+        perf_wo_cell, perf_wi_cell, norm_num(neg_min), norm_num(ipo_pack), norm_str(user), norm_str(shift)
     ]
-    key_full = f"{row[0]}||{row[1]}||{row[3]}||{row[2]}||{row[4]}||{row[5]}||{row[6]}"
-    return row, key_full
+    # کلیدِ یکتا برای جلوگیری از تکرار:
+    key_hour = f"{norm_name(row[0])}||{row[1].strip()}||{row[3]}||{row[4]}"
+    return row, key_hour
 
 def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
     cfg = getKPI_with_fallback(task_type, raw_dt)
@@ -283,8 +322,8 @@ def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
     shift = shift_from_username(user)
     row, key = build_output_row(full_name, task_type, qty, raw_dt, hour_int, occ,
                                 0, user, perf_without, perf_with, "", shift)
-    if key not in existing_keys_full:
-        existing_keys_full.add(key)
+    if key not in existing_keys_hour:
+        existing_keys_hour.add(key)
         new_rows.append(row)
 
 # ---------------------------
@@ -313,7 +352,7 @@ for tab in simple_tabs:
                 record_date, hour = parse_date_hour(date_raw, hour_raw)
                 if not record_date or hour is None:
                     continue
-                if is_blocked(full_name, record_date):
+                if is_blocked(full_name, record_date, hour):
                     continue
 
                 start = r[idx.get("Start", -1)]
@@ -326,7 +365,7 @@ for tab in simple_tabs:
                 fromMin  = float(start) if start else 0
                 toMin    = float(end)   if end   else 0
                 occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0
-                if quantity < 15 or occupied <= 0:
+                if quantity < MIN_QTY_OUT or occupied <= 0:
                     continue
 
                 if tab == "Receive":
@@ -340,7 +379,7 @@ for tab in simple_tabs:
                     order_val = float(order_val_raw) if order_val_raw else 0
                     if order_val > 0:
                         ipo_pack = round(quantity / order_val, 2)
-                    task_type = "Pack_Single" if (ipo_pack and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
+                    task_type = "Pack_Single" if (order_val > 0 and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
 
                 perf_without = perf_with = ""
                 cfg = getKPI(task_type, record_date)
@@ -353,9 +392,9 @@ for tab in simple_tabs:
                     full_name, task_type, quantity, record_date, hour, occupied,
                     order_val, user, perf_without, perf_with, ipo_pack, shift
                 )
-                if key in existing_keys_full:
+                if key in existing_keys_hour:
                     continue
-                existing_keys_full.add(key)
+                existing_keys_hour.add(key)
                 new_rows.append(row)
             except Exception as e:
                 print(f"❌ Error in {tab}: {e}")
@@ -378,8 +417,8 @@ def _read_tab_rows_for(tab_name):
 
         for r in data[1:]:
             try:
-                full_name = r[idx.get("full_name", -1)]
-                if not full_name:
+                full_name_raw = r[idx.get("full_name", -1)]
+                if not full_name_raw:
                     continue
 
                 date_raw = r[idx.get("date", idx.get("Date", -1))]
@@ -387,7 +426,7 @@ def _read_tab_rows_for(tab_name):
                 record_date, hour = parse_date_hour(date_raw, hour_raw)
                 if not record_date or hour is None:
                     continue
-                if is_blocked(full_name, record_date):
+                if is_blocked(full_name_raw, record_date, hour):
                     continue
 
                 start = r[idx.get("Start", -1)]
@@ -404,7 +443,8 @@ def _read_tab_rows_for(tab_name):
                     continue
 
                 rows.append({
-                    "full_name": full_name,
+                    "name_key": norm_name(full_name_raw),
+                    "full_name_raw": full_name_raw,
                     "raw_date": record_date,              # datetime برای KPI
                     "date": norm_date_str(record_date),   # 'YYYY-MM-DD'
                     "hour": int(hour),
@@ -420,14 +460,16 @@ def _read_tab_rows_for(tab_name):
     return rows
 
 def _aggregate_hourly(rows):
-    agg = defaultdict(lambda: {"qty": 0.0, "occ": 0.0, "user": None, "dt": None})
+    agg = defaultdict(lambda: {"qty": 0.0, "occ": 0.0, "user": None, "dt": None, "name_raw": None})
     for it in rows:
-        k = (it["full_name"], it["date"], it["hour"])
+        k = (it["name_key"], it["date"], it["hour"])
         a = agg[k]
         a["qty"] += it["quantity"]
         a["occ"] += it["occupied"]
         a["user"] = it["user"]
         a["dt"]   = it["raw_date"]
+        if not a["name_raw"]:
+            a["name_raw"] = it.get("full_name_raw") or it["name_key"]
     return agg
 
 def _read_overrides(ws):
@@ -454,7 +496,7 @@ def _read_overrides(ws):
                 except:
                     continue
                 dt = datetime(d_only.year, d_only.month, d_only.day)
-            force.add((norm_str(name_raw), norm_date_str(dt), int(hr)))
+            force.add((norm_name(norm_str(name_raw)), norm_date_str(dt), int(hr)))
     except Exception as e:
         print(f"❌ Error reading Larg_Overrides: {e}")
     return force
@@ -469,21 +511,22 @@ force_larg  = _read_overrides(ws_override)
 # 2) در غیر اینصورت، اگر هر دو لاگ دارند و Presort در ±LARG_MATCH_PCT نسبت به Pick بود ⇒ هر دو *_Larg، وگرنه عادی.
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
 
-for (full_name, date_s, hour_int) in all_keys:
-    p = pick_agg.get((full_name, date_s, hour_int))
-    s = presort_agg.get((full_name, date_s, hour_int))
+for (name_key, date_s, hour_int) in all_keys:
+    p = pick_agg.get((name_key, date_s, hour_int))
+    s = presort_agg.get((name_key, date_s, hour_int))
 
-    in_force = (norm_str(full_name), date_s, int(hour_int)) in force_larg
+    in_force = (name_key, date_s, int(hour_int)) in force_larg
+
+    # نام نمایشی برای خروجی (اولویت با Pick، بعد Presort)
+    display_name = (p and p.get("name_raw")) or (s and s.get("name_raw")) or name_key
 
     if in_force:
-        # فقط اجبار را اعمال می‌کنیم؛ منطق درصدی اجرا نمی‌شود
         if p and p["qty"] >= MIN_QTY_OUT:
-            _emit_row(full_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+            _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
         if s and s["qty"] >= MIN_QTY_OUT:
-            _emit_row(full_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+            _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
         continue  # شرط دوم را اجرا نکن
 
-    # اگر اجبار نبود، منطق درصدی
     if p and s:
         p_qty, s_qty = p["qty"], s["qty"]
         if p_qty > 0:
@@ -494,20 +537,20 @@ for (full_name, date_s, hour_int) in all_keys:
 
         if within:
             if p_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+                _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
             if s_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+                _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
         else:
             if p_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+                _emit_row(display_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
             if s_qty >= MIN_QTY_OUT:
-                _emit_row(full_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+                _emit_row(display_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
     elif p:
         if p["qty"] >= MIN_QTY_OUT:
-            _emit_row(full_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+            _emit_row(display_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
     elif s:
         if s["qty"] >= MIN_QTY_OUT:
-            _emit_row(full_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+            _emit_row(display_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
 
 # ---------------------------
 # درج نهایی
@@ -519,3 +562,4 @@ else:
     print("ℹ️ No new rows to add.")
 
 sys.exit(0)
+
