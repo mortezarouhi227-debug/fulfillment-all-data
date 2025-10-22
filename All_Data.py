@@ -1,4 +1,4 @@
-# All_Data.py (final)
+# All_Data.py (final, percent display)
 # -*- coding: utf-8 -*-
 import os, json, sys, re, unicodedata
 from datetime import datetime, timedelta
@@ -18,21 +18,20 @@ SPREADSHEET_ID = os.getenv(
     "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
 
-# حداقل مقدار برای ثبت خروجی‌های تجمیعی Pick/Presort و تب‌های ساده
+# حداقل مقدار برای ثبت خروجی‌های تجمیعی
 try:
     MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
 except:
     MIN_QTY_OUT = 15
 
-# درصد بازه برای تشخیص *_Larg در منطق درصدی (پیش‌فرض ±30%)
+# بازه تطبیق برای *_Larg (±30% پیش‌فرض)
 try:
     LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.30"))
 except:
     LARG_MATCH_PCT = 0.30
 
-# اگر True باشد، performance را به صورت "xx.x%" رشته‌ای ذخیره می‌کند؛
-# اگر False باشد، مقدار عددی (مثلا 87.5) ذخیره می‌شود.
-PERF_AS_PERCENT = os.getenv("PERF_AS_PERCENT", "false").lower() in ("1","true","yes")
+# خروجی پرفورمنس با علامت درصد (ثابت: True)
+PERF_AS_PERCENT = True
 
 # ---------------------------
 # اتصال
@@ -145,17 +144,14 @@ def parse_date_only(x):
     return None
 
 def norm_name(s: str) -> str:
-    """نام فارسی را یکتا می‌کند: ی/ک عربی→فارسی، حذف نیم‌فاصله/RTL، فشرده‌سازی فاصله‌ها، NFKC"""
+    """نرمال‌سازی نام فارسی: یکسان‌سازی ی/ک، حذف نیم‌فاصله/RTL و فشرده‌سازی فاصله‌ها"""
     if s is None:
         return ""
     s = str(s)
     s = unicodedata.normalize("NFKC", s)
-    # یکسان‌سازی حروف عربی/فارسی
     s = s.replace("ي", "ی").replace("ى", "ی").replace("ې", "ی")
     s = s.replace("ك", "ک")
-    # حذف کنترل‌کاراکترها و نیم‌فاصله/RTL marks
     s = s.replace("\u200c", " ").replace("\u200f", "").replace("\u202b", "")
-    # فشرده‌سازی فاصله‌ها
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -182,7 +178,6 @@ try:
 except:
     ws_override = None
 
-# هدرها
 HEADERS = [
     'full_name','task_type','quantity','date','hour','occupied_hours','order',
     'performance_without_rotation','performance_with_rotation','Negative_Minutes',
@@ -249,7 +244,7 @@ def getKPI_with_fallback(task_type, recordDate):
     return None
 
 # ---------------------------
-# Other Work (Blocked) — فقط همان تاریخ و همان ساعت
+# Other Work (Blocked) — دقیقاً همان تاریخ+ساعت
 # ---------------------------
 other = ws_other.get_all_values()
 blocked_exact = set()  # (norm_name, 'YYYY-MM-DD', hour)
@@ -259,14 +254,13 @@ if other and len(other) > 1:
         if not name:
             continue
         ts_raw = row[0] if len(row) > 0 else ""
-        # اگر ستون B ساعت جدا داشته باشد، همان را در نظر می‌گیریم
         hr_col = row[1] if len(row) > 1 else ""
         dth, hrh = parse_date_hour(ts_raw, hr_col)
         if dth and hrh is not None:
             blocked_exact.add((norm_name(name), norm_date_str(dth), int(hrh)))
         else:
             d_only = parse_date_only(ts_raw)
-            if d_only is not None and isinstance(hr_col, (int,float,str)) and str(hr_col).strip() != "":
+            if d_only is not None and str(hr_col).strip() != "":
                 try:
                     h = int(float(str(hr_col).strip()))
                     if 0 <= h <= 23:
@@ -283,16 +277,14 @@ def is_blocked(full_name: str, rec_dt: datetime, hour: int) -> bool:
 # Utility: ساخت ردیف خروجی
 # ---------------------------
 def _perf_to_cell(x):
-    """اگر PERF_AS_PERCENT True باشد رشته 'xx.x%'، در غیر این صورت عدد (float)"""
     if x == "" or x is None:
         return ""
     try:
         f = float(x)
     except:
         return ""
-    if PERF_AS_PERCENT:
-        return f"{f:.1f}%"
-    return float(f"{f:.1f}")  # عدد یک‌رقم اعشار
+    # خروجی رشته‌ای درصددار
+    return f"{f:.1f}%" if PERF_AS_PERCENT else float(f"{f:.1f}")
 
 def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
                      order_val, user, perf_without, perf_with, ipo_pack, shift):
@@ -303,13 +295,11 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     ord_s = norm_num(order_val) if str(task_type).startswith("Pack") else ""
     perf_wo_cell = _perf_to_cell(perf_without)
     perf_wi_cell = _perf_to_cell(perf_with)
-    # occupied بر دقیقه؛ Negative_Minutes = 60 - occupied
     neg_min = (60 - occupied) if (occupied and 0 < occupied < 60) else ""
     row = [
         norm_str(full_name), norm_str(task_type), qty_s, dt_s, hr_s, occ_s, ord_s,
         perf_wo_cell, perf_wi_cell, norm_num(neg_min), norm_num(ipo_pack), norm_str(user), norm_str(shift)
     ]
-    # کلیدِ یکتا برای جلوگیری از تکرار:
     key_hour = f"{norm_name(row[0])}||{row[1].strip()}||{row[3]}||{row[4]}"
     return row, key_hour
 
@@ -403,7 +393,7 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort + Larg_Overrides + منطق درصدی
+# Pick & Presort + Overrides + منطق درصدی
 # ---------------------------
 def _read_tab_rows_for(tab_name):
     rows = []
@@ -445,8 +435,8 @@ def _read_tab_rows_for(tab_name):
                 rows.append({
                     "name_key": norm_name(full_name_raw),
                     "full_name_raw": full_name_raw,
-                    "raw_date": record_date,              # datetime برای KPI
-                    "date": norm_date_str(record_date),   # 'YYYY-MM-DD'
+                    "raw_date": record_date,
+                    "date": norm_date_str(record_date),
                     "hour": int(hour),
                     "quantity": quantity,
                     "occupied": occupied,
@@ -501,14 +491,10 @@ def _read_overrides(ws):
         print(f"❌ Error reading Larg_Overrides: {e}")
     return force
 
-# خواندن و تجمیع
 pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
 presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
 force_larg  = _read_overrides(ws_override)
 
-# ترتیب اعمال:
-# 1) اگر (name,date,hour) در Larg_Overrides بود ⇒ همان بازه را *_Larg می‌زنیم.
-# 2) در غیر اینصورت، اگر هر دو لاگ دارند و Presort در ±LARG_MATCH_PCT نسبت به Pick بود ⇒ هر دو *_Larg، وگرنه عادی.
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
 
 for (name_key, date_s, hour_int) in all_keys:
@@ -516,8 +502,6 @@ for (name_key, date_s, hour_int) in all_keys:
     s = presort_agg.get((name_key, date_s, hour_int))
 
     in_force = (name_key, date_s, int(hour_int)) in force_larg
-
-    # نام نمایشی برای خروجی (اولویت با Pick، بعد Presort)
     display_name = (p and p.get("name_raw")) or (s and s.get("name_raw")) or name_key
 
     if in_force:
@@ -525,16 +509,14 @@ for (name_key, date_s, hour_int) in all_keys:
             _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
         if s and s["qty"] >= MIN_QTY_OUT:
             _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
-        continue  # شرط دوم را اجرا نکن
+        continue
 
     if p and s:
         p_qty, s_qty = p["qty"], s["qty"]
+        within = False
         if p_qty > 0:
             low, high = p_qty * (1 - LARG_MATCH_PCT), p_qty * (1 + LARG_MATCH_PCT)
             within = (low <= s_qty <= high)
-        else:
-            within = False
-
         if within:
             if p_qty >= MIN_QTY_OUT:
                 _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
@@ -562,4 +544,3 @@ else:
     print("ℹ️ No new rows to add.")
 
 sys.exit(0)
-
