@@ -1,4 +1,4 @@
-# All_Data.py (final, percent display)
+# All_Data.py (final)
 # -*- coding: utf-8 -*-
 import os, json, sys, re, unicodedata
 from datetime import datetime, timedelta
@@ -18,19 +18,13 @@ SPREADSHEET_ID = os.getenv(
     "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
 
-# حداقل مقدار برای ثبت خروجی‌های تجمیعی
+# حداقل مقدار معتبر برای ثبت خروجی‌ها
 try:
     MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
 except:
     MIN_QTY_OUT = 15
 
-# بازه تطبیق برای *_Larg (±30% پیش‌فرض)
-try:
-    LARG_MATCH_PCT = float(os.getenv("LARG_MATCH_PCT", "0.30"))
-except:
-    LARG_MATCH_PCT = 0.30
-
-# خروجی پرفورمنس با علامت درصد (ثابت: True)
+# نمایش پرفورمنس به صورت درصد با علامت %
 PERF_AS_PERCENT = True
 
 # ---------------------------
@@ -144,7 +138,7 @@ def parse_date_only(x):
     return None
 
 def norm_name(s: str) -> str:
-    """نرمال‌سازی نام فارسی: یکسان‌سازی ی/ک، حذف نیم‌فاصله/RTL و فشرده‌سازی فاصله‌ها"""
+    """نرمال‌سازی نام فارسی: ی/ک عربی→فارسی، حذف نیم‌فاصله/RTL، فشرده‌سازی فاصله‌ها"""
     if s is None:
         return ""
     s = str(s)
@@ -283,7 +277,6 @@ def _perf_to_cell(x):
         f = float(x)
     except:
         return ""
-    # خروجی رشته‌ای درصددار
     return f"{f:.1f}%" if PERF_AS_PERCENT else float(f"{f:.1f}")
 
 def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
@@ -393,7 +386,7 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort + Overrides + منطق درصدی
+# Pick & Presort + Overrides + منطق هم‌زمانی برای Larg
 # ---------------------------
 def _read_tab_rows_for(tab_name):
     rows = []
@@ -428,7 +421,6 @@ def _read_tab_rows_for(tab_name):
                 fromMin  = float(start) if start else 0.0
                 toMin    = float(end)   if end   else 0.0
                 occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0.0
-
                 if quantity <= 0 or occupied <= 0:
                     continue
 
@@ -495,6 +487,10 @@ pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
 presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
 force_larg  = _read_overrides(ws_override)
 
+# ترتیب اعمال:
+# 1) اگر (name,date,hour) در Larg_Overrides بود ⇒ *_Larg
+# 2) در غیر اینصورت، اگر هر دو لاگ در همان ساعت وجود دارند ⇒ هر دو *_Larg
+# 3) در غیر اینصورت، هر کدام تنها بود ⇒ حالت عادی
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
 
 for (name_key, date_s, hour_int) in all_keys:
@@ -512,21 +508,10 @@ for (name_key, date_s, hour_int) in all_keys:
         continue
 
     if p and s:
-        p_qty, s_qty = p["qty"], s["qty"]
-        within = False
-        if p_qty > 0:
-            low, high = p_qty * (1 - LARG_MATCH_PCT), p_qty * (1 + LARG_MATCH_PCT)
-            within = (low <= s_qty <= high)
-        if within:
-            if p_qty >= MIN_QTY_OUT:
-                _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
-            if s_qty >= MIN_QTY_OUT:
-                _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
-        else:
-            if p_qty >= MIN_QTY_OUT:
-                _emit_row(display_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
-            if s_qty >= MIN_QTY_OUT:
-                _emit_row(display_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
+        if p["qty"] >= MIN_QTY_OUT:
+            _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
+        if s["qty"] >= MIN_QTY_OUT:
+            _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
     elif p:
         if p["qty"] >= MIN_QTY_OUT:
             _emit_row(display_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
@@ -544,3 +529,4 @@ else:
     print("ℹ️ No new rows to add.")
 
 sys.exit(0)
+
