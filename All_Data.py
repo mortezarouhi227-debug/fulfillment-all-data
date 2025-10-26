@@ -238,34 +238,41 @@ def getKPI_with_fallback(task_type, recordDate):
     return None
 
 # ---------------------------
-# Other Work (Blocked) — دقیقاً همان تاریخ+ساعت
+# Other Work — منطق «آخرین تاریخ» (از آن تاریخ به بعد بلاک)
 # ---------------------------
 other = ws_other.get_all_values()
-blocked_exact = set()  # (norm_name, 'YYYY-MM-DD', hour)
+blocked_from_date = {}  # { norm_name(full_name): date }
+
 if other and len(other) > 1:
     for row in other[1:]:
-        name = norm_str(row[2] if len(row) > 2 else "")
-        if not name:
+        # نام از ستون C؛ اگر خالی بود از ستون B
+        name_raw = norm_str(row[2] if len(row) > 2 else "") or norm_str(row[1] if len(row) > 1 else "")
+        if not name_raw:
             continue
-        ts_raw = row[0] if len(row) > 0 else ""
-        hr_col = row[1] if len(row) > 1 else ""
-        dth, hrh = parse_date_hour(ts_raw, hr_col)
-        if dth and hrh is not None:
-            blocked_exact.add((norm_name(name), norm_date_str(dth), int(hrh)))
-        else:
-            d_only = parse_date_only(ts_raw)
-            if d_only is not None and str(hr_col).strip() != "":
-                try:
-                    h = int(float(str(hr_col).strip()))
-                    if 0 <= h <= 23:
-                        blocked_exact.add((norm_name(name), d_only.strftime("%Y-%m-%d"), h))
-                except:
-                    pass
+        ts_raw = row[0] if len(row) > 0 else ""   # تاریخ/تایم‌استمپ در ستون A
+
+        d_only = parse_date_only(ts_raw)
+        if not d_only:
+            dt, _ = parse_date_hour(ts_raw, "")
+            d_only = dt.date() if dt else None
+        if not d_only:
+            continue
+
+        key = norm_name(name_raw)
+        prev = blocked_from_date.get(key)
+        if (prev is None) or (d_only > prev):
+            blocked_from_date[key] = d_only
 
 def is_blocked(full_name: str, rec_dt: datetime, hour: int) -> bool:
-    if rec_dt is None or hour is None:
+    """اگر آخرین تاریخ Other Work برای این نام وجود داشته باشد،
+    همه‌ی رکوردهای آن تاریخ و بعد بلاک می‌شود."""
+    if rec_dt is None:
         return False
-    return (norm_name(full_name), norm_date_str(rec_dt), int(hour)) in blocked_exact
+    key = norm_name(full_name)
+    d_limit = blocked_from_date.get(key)
+    if not d_limit:
+        return False
+    return rec_dt.date() >= d_limit
 
 # ---------------------------
 # Utility: ساخت ردیف خروجی
@@ -529,4 +536,5 @@ else:
     print("ℹ️ No new rows to add.")
 
 sys.exit(0)
+
 
