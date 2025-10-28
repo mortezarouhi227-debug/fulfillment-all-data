@@ -1,4 +1,4 @@
-# All_Data.py (final with robust dedup + Larg_Overrides by type)
+# All_Data.py (final with robust dedup + Larg_Overrides by type + strong name normalization)
 # -*- coding: utf-8 -*-
 import os, json, sys, re, unicodedata
 from datetime import datetime, timedelta
@@ -137,20 +137,29 @@ def parse_date_only(x):
             pass
     return None
 
+# ----- Regex sets for normalization -----
+_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\uFEFF]")  # نامرئی‌ها/کنترل‌ها
+_ARABIC_DIAC = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")             # اعراب/حرکات عربی
+
 def norm_name(s: str) -> str:
-    """نرمال‌سازی نام فارسی: ی/ک عربی→فارسی، حذف نیم‌فاصله/RTL، فشرده‌سازی فاصله‌ها"""
+    """نرمال‌سازی قوی نام: ی/ک عربی→فارسی، حذف نامرئی‌ها/اعراب/NBSP/کشیده، فشرده‌سازی فاصله‌ها"""
     if s is None:
         return ""
-    s = str(s)
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("ي", "ی").replace("ى", "ی").replace("ې", "ی")
-    s = s.replace("ك", "ک")
-    s = s.replace("\u200c", " ").replace("\u200f", "").replace("\u202b", "")
+    s = unicodedata.normalize("NFKC", str(s))
+    # حروف عربی به فارسی
+    s = s.replace("ي", "ی").replace("ى", "ی").replace("ې", "ی").replace("ك", "ک")
+    # حذف کنترل‌ها و اعراب
+    s = _ZW_RE.sub("", s)
+    s = _ARABIC_DIAC.sub("", s)
+    # نیم‌فاصله به فاصله
+    s = s.replace("\u200c", " ")
+    # NBSP و تب و خط‌جدید به فاصله
+    s = s.replace("\u00A0", " ").replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    # حذف کشیده
+    s = s.replace("\u0640", "")
+    # فشرده‌سازی هر نوع whitespace به یک فاصله
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
-# ----- NEW: ضد کاراکتر نامرئی و نرمال‌سازی task_type -----
-_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\uFEFF\u0640]")
 
 def norm_task(s: str) -> str:
     """نرمال‌سازی task_type: حذف نامرئی‌ها/RTL، فشرده‌سازی فاصله‌ها"""
@@ -158,6 +167,7 @@ def norm_task(s: str) -> str:
         return ""
     s = unicodedata.normalize("NFKC", str(s))
     s = _ZW_RE.sub("", s)
+    s = s.replace("\u0640", "")
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -329,8 +339,11 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     perf_wi_cell = _perf_to_cell(perf_with)
     neg_min = (60 - occupied) if (occupied and 0 < occupied < 60) else ""
     row = [
-        norm_str(full_name), norm_task(norm_str(task_type)), qty_s, dt_s, hr_s, occ_s, ord_s,
-        perf_wo_cell, perf_wi_cell, norm_num(neg_min), norm_num(ipo_pack), norm_str(user), norm_str(shift)
+        norm_name(full_name),                   # نام را نرمال‌شده بنویس
+        norm_task(norm_str(task_type)),
+        qty_s, dt_s, hr_s, occ_s, ord_s,
+        perf_wo_cell, perf_wi_cell, norm_num(neg_min),
+        norm_num(ipo_pack), norm_str(user), norm_str(shift)
     ]
     key_hour = f"{norm_name(row[0])}||{norm_task(row[1])}||{row[3]}||{norm_hour_key(row[4])}"
     return row, key_hour
@@ -602,7 +615,6 @@ for (name_key, date_s, hour_int) in all_keys:
         elif mode == "presort":
             if s and s["qty"] >= MIN_QTY_OUT:
                 _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
-        # اگر نوع معتبر نبود، هیچ‌چیز Larg نمی‌شود.
         continue
 
     if p and s:
