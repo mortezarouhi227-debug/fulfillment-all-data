@@ -1,4 +1,4 @@
-# All_Data.py (final with robust dedup + Larg_Overrides by type + strong name normalization)
+# All_Data.py (final - robust dedup + typed overrides + strong name normalization + space-insensitive keys)
 # -*- coding: utf-8 -*-
 import os, json, sys, re, unicodedata
 from datetime import datetime, timedelta
@@ -18,13 +18,11 @@ SPREADSHEET_ID = os.getenv(
     "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
 )
 
-# حداقل مقدار معتبر برای ثبت خروجی‌ها
 try:
     MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
 except:
     MIN_QTY_OUT = 15
 
-# نمایش پرفورمنس به صورت درصد با علامت %
 PERF_AS_PERCENT = True
 
 # ---------------------------
@@ -86,7 +84,6 @@ def _parse_excel_serial(val):
 def parse_date_hour(date_raw, hour_raw):
     record_date, hour_val = None, None
     try:
-        # تاریخ
         if isinstance(date_raw, (int, float)) and float(date_raw) > 30000:
             record_date = _parse_excel_serial(date_raw)
         elif isinstance(date_raw, str) and date_raw:
@@ -96,7 +93,6 @@ def parse_date_hour(date_raw, hour_raw):
                     break
                 except:
                     continue
-        # ساعت
         if isinstance(hour_raw, (int, float)):
             f = float(hour_raw)
             if 0 <= int(f) <= 23:
@@ -138,31 +134,29 @@ def parse_date_only(x):
     return None
 
 # ----- Regex sets for normalization -----
-_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\uFEFF]")  # نامرئی‌ها/کنترل‌ها
-_ARABIC_DIAC = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")             # اعراب/حرکات عربی
+_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\uFEFF]")
+_ARABIC_DIAC = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")
 
 def norm_name(s: str) -> str:
-    """نرمال‌سازی قوی نام: ی/ک عربی→فارسی، حذف نامرئی‌ها/اعراب/NBSP/کشیده، فشرده‌سازی فاصله‌ها"""
+    """نمایش انسانی: ی/ک عربی→فارسی، حذف نامرئی‌ها/اعراب، فشرده‌سازی فاصله‌ها (ولی فاصله را حفظ می‌کند)"""
     if s is None:
         return ""
     s = unicodedata.normalize("NFKC", str(s))
-    # حروف عربی به فارسی
     s = s.replace("ي", "ی").replace("ى", "ی").replace("ې", "ی").replace("ك", "ک")
-    # حذف کنترل‌ها و اعراب
     s = _ZW_RE.sub("", s)
     s = _ARABIC_DIAC.sub("", s)
-    # نیم‌فاصله به فاصله
     s = s.replace("\u200c", " ")
-    # NBSP و تب و خط‌جدید به فاصله
     s = s.replace("\u00A0", " ").replace("\t", " ").replace("\r", " ").replace("\n", " ")
-    # حذف کشیده
     s = s.replace("\u0640", "")
-    # فشرده‌سازی هر نوع whitespace به یک فاصله
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+def name_key(s: str) -> str:
+    """کلید مقایسه: مثل norm_name اما تمام whitespace را حذف می‌کند ⇒ «امیررضا» == «امیر رضا»"""
+    s = norm_name(s)
+    return re.sub(r"\s+", "", s)
+
 def norm_task(s: str) -> str:
-    """نرمال‌سازی task_type: حذف نامرئی‌ها/RTL، فشرده‌سازی فاصله‌ها"""
     if s is None:
         return ""
     s = unicodedata.normalize("NFKC", str(s))
@@ -172,7 +166,6 @@ def norm_task(s: str) -> str:
     return s
 
 def norm_hour_key(x):
-    """ساعت را برای کلید یکتا به int (0..23) تبدیل می‌کند."""
     if x is None or x == "":
         return ""
     try:
@@ -180,7 +173,6 @@ def norm_hour_key(x):
         i = int(f)
         if 0 <= i <= 23:
             return str(i)
-        # اگر سریال اکسل باشد (بزرگ)، ساعتش را بگیر
         return str(_parse_excel_serial(f).hour)
     except:
         s = str(x).strip()
@@ -210,7 +202,7 @@ ws_all   = ss.worksheet("All_Data")
 ws_cfg   = ss.worksheet("KPI_Config")
 ws_other = ss.worksheet("Other Work")
 try:
-    ws_override = ss.worksheet("Larg_Overrides")  # هدرهای فارسی/انگلیسی پشتیبانی می‌شود
+    ws_override = ss.worksheet("Larg_Overrides")
 except:
     ws_override = None
 
@@ -230,16 +222,16 @@ else:
         vals_all = ws_all.get_all_values()
 
 # ---------------------------
-# جلوگیری از تکرار (کلید یکتا: norm_name + norm_task + date + hour(int))
+# ضدتکرار: کلید = name_key + norm_task + date + hour(int)
 # ---------------------------
 existing_keys_hour = set()
 for r in vals_all[1:]:
-    full_name = norm_name(r[0] if len(r)>0 else "")
-    task_type = norm_task(r[1] if len(r)>1 else "")
-    dt        = norm_date_str(r[3] if len(r)>3 else "")
-    hr_raw    = r[4] if len(r)>4 else ""
-    hr_key    = norm_hour_key(hr_raw)
-    existing_keys_hour.add(f"{full_name}||{task_type}||{dt}||{hr_key}")
+    full_name_k = name_key(r[0] if len(r)>0 else "")
+    task_type   = norm_task(r[1] if len(r)>1 else "")
+    dt          = norm_date_str(r[3] if len(r)>3 else "")
+    hr_raw      = r[4] if len(r)>4 else ""
+    hr_key      = norm_hour_key(hr_raw)
+    existing_keys_hour.add(f"{full_name_k}||{task_type}||{dt}||{hr_key}")
 
 # ---------------------------
 # KPI Config (+ fallback)
@@ -280,37 +272,32 @@ def getKPI_with_fallback(task_type, recordDate):
     return None
 
 # ---------------------------
-# Other Work — منطق «آخرین تاریخ» (از آن تاریخ به بعد بلاک)
+# Other Work — بلوک از آخرین تاریخ
 # ---------------------------
 other = ws_other.get_all_values()
-blocked_from_date = {}  # { norm_name(full_name): date }
+blocked_from_date = {}  # { name_key(full_name): date }
 
 if other and len(other) > 1:
     for row in other[1:]:
-        # نام از ستون C؛ اگر خالی بود از ستون B
         name_raw = norm_str(row[2] if len(row) > 2 else "") or norm_str(row[1] if len(row) > 1 else "")
         if not name_raw:
             continue
-        ts_raw = row[0] if len(row) > 0 else ""   # تاریخ/تایم‌استمپ در ستون A
-
+        ts_raw = row[0] if len(row) > 0 else ""
         d_only = parse_date_only(ts_raw)
         if not d_only:
             dt, _ = parse_date_hour(ts_raw, "")
             d_only = dt.date() if dt else None
         if not d_only:
             continue
-
-        key = norm_name(name_raw)
+        key = name_key(name_raw)
         prev = blocked_from_date.get(key)
         if (prev is None) or (d_only > prev):
             blocked_from_date[key] = d_only
 
 def is_blocked(full_name: str, rec_dt: datetime, hour: int) -> bool:
-    """اگر آخرین تاریخ Other Work برای این نام وجود داشته باشد،
-    همه‌ی رکوردهای آن تاریخ و بعد بلاک می‌شود."""
     if rec_dt is None:
         return False
-    key = norm_name(full_name)
+    key = name_key(full_name)
     d_limit = blocked_from_date.get(key)
     if not d_limit:
         return False
@@ -326,7 +313,7 @@ def _perf_to_cell(x):
         f = float(x)
     except:
         return ""
-    return f"{f:.1f}%" if PERF_AS_PERCENT else float(f"{f:.1f}")  # طبق خواسته فعلی
+    return f"{f:.1f}%" if PERF_AS_PERCENT else float(f"{f:.1f}")
 
 def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
                      order_val, user, perf_without, perf_with, ipo_pack, shift):
@@ -339,23 +326,21 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     perf_wi_cell = _perf_to_cell(perf_with)
     neg_min = (60 - occupied) if (occupied and 0 < occupied < 60) else ""
     row = [
-        norm_name(full_name),                   # نام را نرمال‌شده بنویس
+        norm_name(full_name),  # برای نمایش
         norm_task(norm_str(task_type)),
         qty_s, dt_s, hr_s, occ_s, ord_s,
         perf_wo_cell, perf_wi_cell, norm_num(neg_min),
         norm_num(ipo_pack), norm_str(user), norm_str(shift)
     ]
-    key_hour = f"{norm_name(row[0])}||{norm_task(row[1])}||{row[3]}||{norm_hour_key(row[4])}"
+    key_hour = f"{name_key(row[0])}||{norm_task(row[1])}||{row[3]}||{norm_hour_key(row[4])}"
     return row, key_hour
 
 def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
     cfg = getKPI_with_fallback(task_type, raw_dt)
     perf_without = perf_with = ""
     if cfg and qty > 0 and occ > 0:
-        # توجه: در نسخه‌ی فعلی rotation با دقیقه ضرب می‌شود (مطابق منطق فعلی شما)
         perf_without = (qty / cfg['base']) * 100.0
         perf_with    = (qty / (occ * cfg['rotation'])) * 100.0
-
     shift = shift_from_username(user)
     row, key = build_output_row(full_name, task_type, qty, raw_dt, hour_int, occ,
                                 0, user, perf_without, perf_with, "", shift)
@@ -369,7 +354,7 @@ def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
 # تب‌های ساده
 # ---------------------------
 new_rows = []
-seen_new_keys = set()  # جلوگیری از دوباره‌افزودن در همین اجرا
+seen_new_keys = set()
 
 simple_tabs = ["Receive", "Locate", "Sort", "Pack", "Stock taking"]
 for tab in simple_tabs:
@@ -386,7 +371,6 @@ for tab in simple_tabs:
                 full_name = r[idx.get("full_name", -1)]
                 if not full_name:
                     continue
-
                 date_raw = r[idx.get("date", idx.get("Date", -1))]
                 hour_raw = r[idx.get("hour", idx.get("Hour", -1))]
                 record_date, hour = parse_date_hour(date_raw, hour_raw)
@@ -394,7 +378,6 @@ for tab in simple_tabs:
                     continue
                 if is_blocked(full_name, record_date, hour):
                     continue
-
                 start = r[idx.get("Start", -1)]
                 end   = r[idx.get("End",   -1)]
                 qty   = r[idx.get("Count", idx.get("count", -1))]
@@ -413,7 +396,6 @@ for tab in simple_tabs:
                     center = r[idx.get("warehouse_name", idx.get("warehouses_name", -1))]
                     if (center or "").strip() != "مرکز پردازش مهرآباد":
                         continue
-
                 order_val = 0
                 if tab == "Pack":
                     order_val = float(order_val_raw) if order_val_raw else 0
@@ -421,7 +403,6 @@ for tab in simple_tabs:
                         ipo_pack = round(quantity / order_val, 2)
                     task_type = "Pack_Single" if (order_val > 0 and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
 
-                # KPI
                 perf_without = perf_with = ""
                 cfg = getKPI(task_type, record_date)
                 if cfg and quantity > 0 and occupied > 0:
@@ -446,7 +427,7 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort + Overrides + منطق Larg بر اساس نوع
+# Pick & Presort + Overrides (typed)
 # ---------------------------
 def _read_tab_rows_for(tab_name):
     rows = []
@@ -463,7 +444,6 @@ def _read_tab_rows_for(tab_name):
                 full_name_raw = r[idx.get("full_name", -1)]
                 if not full_name_raw:
                     continue
-
                 date_raw = r[idx.get("date", idx.get("Date", -1))]
                 hour_raw = r[idx.get("hour", idx.get("Hour", -1))]
                 record_date, hour = parse_date_hour(date_raw, hour_raw)
@@ -471,7 +451,6 @@ def _read_tab_rows_for(tab_name):
                     continue
                 if is_blocked(full_name_raw, record_date, hour):
                     continue
-
                 start = r[idx.get("Start", -1)]
                 end   = r[idx.get("End",   -1)]
                 qty   = r[idx.get("Count", idx.get("count", -1))]
@@ -485,7 +464,7 @@ def _read_tab_rows_for(tab_name):
                     continue
 
                 rows.append({
-                    "name_key": norm_name(full_name_raw),
+                    "name_key": name_key(full_name_raw),          # مقایسه بدون فاصله
                     "full_name_raw": full_name_raw,
                     "raw_date": record_date,
                     "date": norm_date_str(record_date),
@@ -511,20 +490,19 @@ def _aggregate_hourly(rows):
         a["user"] = it["user"]
         a["dt"]   = it["raw_date"]
         if not a["name_raw"]:
-            a["name_raw"] = it.get("full_name_raw") or it["name_key"]
+            a["name_raw"] = it.get("full_name_raw")
     return agg
 
 def _read_overrides(ws):
     """
-    Larg_Overrides با هدرهای فارسی/انگلیسی:
-      - تاریخ: یکی از ['Timestamp','date','تاریخ']
-      - ساعت:  یکی از ['hour','ساعت','ساعت حضور در لوکیشن']
-      - نام:   یکی از ['full_name','نام','name','نام پرسنلی','Column 5']
-      - نوع:   یکی از ['type','task_type','لوکیشن کاری']    # Pick یا Presort
-
+    هدرها:
+      - تاریخ: ['Timestamp','date','تاریخ']
+      - ساعت:  ['hour','ساعت','ساعت حضور در لوکیشن']
+      - نام:   ['full_name','نام','name','نام پرسنلی','Column 5']
+      - نوع:   ['type','task_type','لوکیشن کاری']  -> Pick | Presort
     خروجی:
-      force_larg:  set از کلیدهای پایه (name,date,hour)
-      force_only: dict { (name,date,hour) : 'pick' | 'presort' }
+      force_larg: set((name_key,date,hour))
+      force_only: dict[(name_key,date,hour)] -> 'pick'|'presort'
     """
     force = set()
     only  = {}
@@ -556,7 +534,6 @@ def _read_overrides(ws):
         for r in data[1:]:
             if max(col_date,col_hour,col_name,col_type) >= len(r):
                 continue
-
             date_raw = r[col_date]
             hour_raw = r[col_hour]
             name_raw = r[col_name]
@@ -581,7 +558,7 @@ def _read_overrides(ws):
                     continue
                 dt = datetime(d_only.year, d_only.month, d_only.day)
 
-            key = (norm_name(norm_str(name_raw)), norm_date_str(dt), int(hr))
+            key = (name_key(norm_str(name_raw)), norm_date_str(dt), int(hr))
             force.add(key)
             only[key] = t
 
@@ -594,19 +571,15 @@ pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
 presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
 force_larg, force_only = _read_overrides(ws_override)
 
-# ترتیب اعمال:
-# 1) اگر (name,date,hour) در Larg_Overrides بود ⇒ فقط همان نوع مشخص‌شده را *_Larg
-# 2) در غیر اینصورت، اگر هر دو لاگ در همان ساعت وجود دارند ⇒ هر دو *_Larg
-# 3) در غیراینصورت، هر کدام تنها بود ⇒ حالت عادی
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
 
-for (name_key, date_s, hour_int) in all_keys:
-    p = pick_agg.get((name_key, date_s, hour_int))
-    s = presort_agg.get((name_key, date_s, hour_int))
+for (name_k, date_s, hour_int) in all_keys:
+    p = pick_agg.get((name_k, date_s, hour_int))
+    s = presort_agg.get((name_k, date_s, hour_int))
 
-    in_force = (name_key, date_s, int(hour_int)) in force_larg
-    mode = force_only.get((name_key, date_s, int(hour_int)))  # 'pick' | 'presort' | None
-    display_name = (p and p.get("name_raw")) or (s and s.get("name_raw")) or name_key
+    in_force = (name_k, date_s, int(hour_int)) in force_larg
+    mode = force_only.get((name_k, date_s, int(hour_int)))  # 'pick' | 'presort' | None
+    display_name = (p and p.get("name_raw")) or (s and s.get("name_raw")) or ""
 
     if in_force:
         if mode == "pick":
