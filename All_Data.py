@@ -195,6 +195,25 @@ def shift_from_username(user):
             s = "Flex"
     return s
 
+# --- NEW: Receive center filter ---
+def is_allowed_receive_center(center_raw: str) -> bool:
+    """
+    Only allow centers whose name starts with:
+      - 'مرکز پردازش مهرآباد'
+      - 'هاب گنجه'
+    Drop anything that starts with 'هاب' but is not 'هاب گنجه'.
+    """
+    c = norm_name(center_raw)
+    if not c:
+        return False
+    if c.startswith("مرکز پردازش مهرآباد"):
+        return True
+    if c.startswith("هاب گنجه"):
+        return True
+    if c.startswith("هاب"):
+        return False
+    return False  # only the two above are allowed
+
 # ---------------------------
 # Sheets
 # ---------------------------
@@ -421,8 +440,8 @@ for tab in simple_tabs:
                 ipo_pack, task_type = "", tab
                 if tab == "Receive":
                     center = r[idx.get("warehouse_name", idx.get("warehouses_name", -1))]
-                    if (center or "").strip() != "مرکز پردازش مهرآباد":
-                        continue
+                    if not is_allowed_receive_center(center):
+                        continue  # <-- only مهرآباد center or هاب گنجه
 
                 order_val = 0
                 if tab == "Pack":
@@ -456,7 +475,7 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort + Overrides (ONLY)  ← هیچ منطق دیگری برای *_Larg* وجود ندارد
+# Pick & Presort + Overrides (ONLY)
 # ---------------------------
 def _read_tab_rows_for(tab_name):
     rows = []
@@ -526,13 +545,7 @@ def _aggregate_hourly(rows):
 
 def _read_overrides(ws):
     """
-    Larg_Overrides (نسخه‌ی strict بر اساس هدرهای خواسته‌شده):
-      - تاریخ:  «تاریخ حضور در لوکیشن»
-      - ساعت:   «ساعت حضور در لوکیشن»
-      - نام:    «نام پرسنلی»
-      - نوع:    «لوکیشن کاری»   (Pick / Presort یا Pick_Larg / Presort_Larg)
-
-    اگر هدرهای دقیق بالا پیدا نشدند، با اخطار، روی مجموعه‌ی قدیمی ستون‌های جایگزین fallback می‌کنیم.
+    Larg_Overrides strict headers (with fallback)
     """
     force = set()
     only  = {}
@@ -670,7 +683,7 @@ else:
 
 sys.exit(0)
 
-# ====== تکرار عین کدِ بالا طبق فایل ارسالی شما (فقط همین تغییر کوچکِ Shift3 دوباره اعمال شده) ======
+# ====== تکرار عین کدِ بالا طبق فایل ارسالی شما (فقط همین تغییر کوچکِ Shift3 و فیلتر Receive دوباره اعمال شده) ======
 
 # All_Data.py (override-only for *_Larg* + presort exclusivity + strong normalization)
 # -*- coding: utf-8 -*-
@@ -817,6 +830,19 @@ def shift_from_username(user):
         elif lower.endswith(".flex"):
             s = "Flex"
     return s
+
+# --- NEW: Receive center filter (duplicate section) ---
+def is_allowed_receive_center(center_raw: str) -> bool:
+    c = norm_name(center_raw)
+    if not c:
+        return False
+    if c.startswith("مرکز پردازش مهرآباد"):
+        return True
+    if c.startswith("هاب گنجه"):
+        return True
+    if c.startswith("هاب"):
+        return False
+    return False
 
 ws_all   = ss.worksheet("All_Data")
 ws_cfg   = ss.worksheet("KPI_Config")
@@ -1005,7 +1031,8 @@ for tab in simple_tabs:
                 ipo_pack, task_type = "", tab
                 if tab == "Receive":
                     center = r[idx.get("warehouse_name", idx.get("warehouses_name", -1))]
-                    if (center or "").strip() != "مرکز پردازش مهرآباد": continue
+                    if not is_allowed_receive_center(center):
+                        continue  # <-- فقط مهرآباد یا هاب گنجه
 
                 order_val = 0
                 if tab == "Pack":
