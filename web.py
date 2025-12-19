@@ -8,8 +8,8 @@ app = Flask(__name__)
 
 RUN_TOKEN = os.getenv("RUN_TOKEN", "")
 LOCK_PATH = "/tmp/all_data.lock"
-MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1200"))
-LOCK_STALE_SECONDS = int(os.getenv("LOCK_STALE_SECONDS", "7200"))
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1200"))          # 20 min
+LOCK_STALE_SECONDS = int(os.getenv("LOCK_STALE_SECONDS", "7200"))    # 2h
 
 
 def authorized(req) -> bool:
