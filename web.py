@@ -1,20 +1,23 @@
 # web.py
-import os, time, subprocess
+import os
+import time
+import subprocess
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-RUN_TOKEN = os.getenv("RUN_TOKEN", "")  # در Render ست کن
+RUN_TOKEN = os.getenv("RUN_TOKEN", "")
 LOCK_PATH = "/tmp/all_data.lock"
-MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1200"))  # 20 min
-LOCK_STALE_SECONDS = int(os.getenv("LOCK_STALE_SECONDS", "7200"))  # 2h
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1200"))
+LOCK_STALE_SECONDS = int(os.getenv("LOCK_STALE_SECONDS", "7200"))
+
 
 def authorized(req) -> bool:
-    # Authorization: Bearer <token>
     if not RUN_TOKEN:
         return False
     auth = (req.headers.get("Authorization") or "").strip()
     return auth == f"Bearer {RUN_TOKEN}"
+
 
 def lock_active() -> bool:
     if not os.path.exists(LOCK_PATH):
@@ -25,27 +28,32 @@ def lock_active() -> bool:
             os.remove(LOCK_PATH)
             return False
         return True
-    except:
+    except Exception:
         return True
+
 
 def acquire_lock() -> None:
     with open(LOCK_PATH, "w", encoding="utf-8") as f:
         f.write(str(time.time()))
 
+
 def release_lock() -> None:
     try:
         if os.path.exists(LOCK_PATH):
             os.remove(LOCK_PATH)
-    except:
+    except Exception:
         pass
+
 
 @app.get("/")
 def home():
     return "OK"
 
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "lock": lock_active()}), 200
+
 
 @app.post("/run")
 def run():
@@ -64,6 +72,7 @@ def run():
             timeout=MAX_RUN_SECONDS,
             env=os.environ.copy(),
         )
+
         out = (p.stdout or "").strip()
         err = (p.stderr or "").strip()
         ok = (p.returncode == 0)
