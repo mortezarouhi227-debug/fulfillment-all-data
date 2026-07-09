@@ -1,544 +1,348 @@
-# All_Data.py (بدون *_Larg - فقط Pick, Presort, FBM و بقیه)
 # -*- coding: utf-8 -*-
-import os, json, sys, re, unicodedata
+import os, json, math
 from datetime import datetime, timedelta
-from collections import defaultdict
+
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ---------------------------
+# =========================
 # تنظیمات
-# ---------------------------
+# =========================
+SPREADSHEET_ID = "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
+SOURCE_SHEET = "All_Data"
+TARGET_SHEET = "Hourly_Performance"
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-SPREADSHEET_ID = os.getenv(
-    "SPREADSHEET_ID",
-    "1VgKCQ8EjVF2sS8rSPdqFZh2h6CuqWAeqSMR56APvwes"
-)
 
-# حداقل مقدار معتبر برای ثبت خروجی‌ها
-try:
-    MIN_QTY_OUT = int(os.getenv("MIN_QTY_OUT", "15"))
-except:
-    MIN_QTY_OUT = 15
-
-# نمایش پرفورمنس به صورت درصد با علامت %
-PERF_AS_PERCENT = True
-
-# ---------------------------
-# اتصال
-# ---------------------------
-def make_client():
-    env_creds = os.getenv("GOOGLE_CREDENTIALS")
-    try:
-        if env_creds:
-            creds = Credentials.from_service_account_info(json.loads(env_creds), scopes=SCOPES)
-            print("Auth via GOOGLE_CREDENTIALS (ENV).")
-        else:
-            creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-            print("Auth via credentials.json (file).")
-        return gspread.authorize(creds)
-    except Exception as e:
-        print(f"❌ Auth error: {e}")
-        sys.exit(1)
-
-gc = make_client()
-try:
-    ss = gc.open_by_key(SPREADSHEET_ID)
-    print(f"✅ Opened spreadsheet {SPREADSHEET_ID}.")
-except Exception as e:
-    print(f"❌ Open spreadsheet error: {e}")
-    sys.exit(1)
-
-# ---------------------------
-# Helpers
-# ---------------------------
-def norm_str(x):
-    return "" if x is None else str(x).strip()
-
-def norm_num(x):
-    if x is None or x == "":
-        return ""
-    try:
-        f = float(x)
-        return str(int(f)) if f.is_integer() else f"{f:.10g}"
-    except:
-        return norm_str(x)
-
-def norm_date_str(dt):
-    if dt is None or dt == "":
-        return ""
-    if hasattr(dt, "strftime"):
-        return dt.strftime("%Y-%m-%d")
-    s = str(dt).strip()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-        except:
-            pass
-    return s
-
-def _parse_excel_serial(val):
-    return datetime(1899, 12, 30) + timedelta(days=float(val))
-
-def parse_date_hour(date_raw, hour_raw):
-    record_date, hour_val = None, None
-    try:
-        # تاریخ
-        if isinstance(date_raw, (int, float)) and float(date_raw) > 30000:
-            record_date = _parse_excel_serial(date_raw)
-        elif isinstance(date_raw, str) and date_raw:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
-                try:
-                    record_date = datetime.strptime(date_raw.strip(), fmt)
-                    break
-                except:
-                    continue
-        # ساعت
-        if isinstance(hour_raw, (int, float)):
-            f = float(hour_raw)
-            if 0 <= int(f) <= 23:
-                hour_val = int(f)
-            else:
-                hour_val = _parse_excel_serial(f).hour
-        elif isinstance(hour_raw, str) and hour_raw.strip():
-            s = hour_raw.strip()
-            if s.isdigit():
-                v = int(s)
-                if 0 <= v <= 23:
-                    hour_val = v
-            else:
-                try:
-                    hour_val = _parse_excel_serial(float(s)).hour
-                except:
-                    pass
-    except Exception as e:
-        print(f"❌ Error parsing date/hour: {e}")
-    return record_date, hour_val
-
-def parse_date_only(x):
-    if not x:
-        return None
-    if isinstance(x, (int, float)) and float(x) > 30000:
-        return _parse_excel_serial(x).date()
-    if isinstance(x, str):
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%m/%d/%Y %H:%M:%S"):
-            try:
-                return datetime.strptime(x.strip(), fmt).date()
-            except:
-                continue
-        try:
-            f = float(x)
-            if f > 30000:
-                return _parse_excel_serial(f).date()
-        except:
-            pass
-    return None
-
-# ----- Regex sets for normalization -----
-_ZW_RE = re.compile(r"[\u200c\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c\uFEFF]")
-_ARABIC_DIAC = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")
-
-def norm_name(s: str) -> str:
-    if s is None:
-        return ""
-    s = unicodedata.normalize("NFKC", str(s))
-    s = s.replace("ي", "ی").replace("ى", "ی").replace("ې", "ی").replace("ك", "ک")
-    s = _ZW_RE.sub("", s)
-    s = _ARABIC_DIAC.sub("", s)
-    s = s.replace("\u200c", " ")
-    s = s.replace("\u00A0", " ").replace("\t", " ").replace("\r", " ").replace("\n", " ")
-    s = s.replace("\u0640", "")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def norm_task(s: str) -> str:
-    if s is None:
-        return ""
-    s = unicodedata.normalize("NFKC", str(s))
-    s = _ZW_RE.sub("", s)
-    s = s.replace("\u0640", "")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def norm_hour_key(x):
-    if x is None or x == "":
-        return ""
-    try:
-        f = float(x)
-        i = int(f)
-        if 0 <= i <= 23:
-            return str(i)
-        return str(_parse_excel_serial(f).hour)
-    except:
-        s = str(x).strip()
-        if s.isdigit():
-            return s
-        try:
-            return str(_parse_excel_serial(float(s)).hour)
-        except:
-            return s
-
-def shift_from_username(user):
-    s = "Other"
-    if user:
-        lower = user.lower().strip()
-        if lower.endswith(".s1"):
-            s = "Shift1"
-        elif lower.endswith(".s2"):
-            s = "Shift2"
-        elif lower.endswith(".s3"):
-            s = "Shift3"
-        elif lower.endswith(".flex"):
-            s = "Flex"
-    return s
-
-# Receive center filter
-def is_allowed_receive_center(center_raw: str) -> bool:
-    c = norm_name(center_raw)
-    if not c:
-        return False
-    if c.startswith("مرکز پردازش مهرآباد"):
-        return True
-    if c.startswith("هاب گنجه"):
-        return True
-    if c.startswith("هاب"):
-        return False
-    return False
-
-# ---------------------------
-# Sheets
-# ---------------------------
-ws_all   = ss.worksheet("All_Data")
-ws_cfg   = ss.worksheet("KPI_Config")
-ws_other = ss.worksheet("Other Work")
-
-HEADERS = [
-    'full_name','task_type','quantity','date','hour','occupied_hours','order',
-    'performance_without_rotation','performance_with_rotation','Negative_Minutes',
-    'Ipo_Pack','UserName','Shift'
+# ====== تغییر: حذف Pick_Larg و Presort_Larg، اضافه کردن FBM ======
+TASK_TYPES = [
+    "Receive","Locate","Sort","Pack_Multi","Pack_Single",
+    "Pick","Presort","Stock taking","FBM",
 ]
-vals_all = ws_all.get_all_values()
-if not vals_all:
-    ws_all.append_row(HEADERS)
-    vals_all = [HEADERS]
-else:
-    if vals_all[0] != HEADERS:
-        ws_all.delete_rows(1)
-        ws_all.insert_row(HEADERS, 1)
-        vals_all = ws_all.get_all_values()
 
-# جلوگیری از تکرار
-existing_keys_hour = set()
+# =========================
+# اتصال
+# =========================
+def _client():
+    if "GOOGLE_CREDENTIALS" in os.environ:
+        creds = Credentials.from_service_account_info(
+            json.loads(os.environ["GOOGLE_CREDENTIALS"]), scopes=SCOPES
+        )
+    else:
+        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+    return gspread.authorize(creds)
 
-for r in vals_all[1:]:
-    full_name = norm_name(r[0] if len(r)>0 else "")
-    task_type = norm_task(r[1] if len(r)>1 else "")
-    dt        = norm_date_str(r[3] if len(r)>3 else "")
-    hr_raw    = r[4] if len(r)>4 else ""
-    hr_key    = norm_hour_key(hr_raw)
-    if full_name and dt != "" and hr_key != "":
-        existing_keys_hour.add(f"{full_name}||{task_type}||{dt}||{hr_key}")
+# =========================
+# تاریخ
+# =========================
+def serial_to_datetime(n):
+    base = datetime(1899, 12, 30)
+    return base + timedelta(days=float(n))
 
-# ---------------------------
-# KPI Config
-# ---------------------------
-cfg_data = ws_cfg.get_all_values()
-cfg_headers = cfg_data[0] if cfg_data else []
-kpi_configs = []
-for row in cfg_data[1:]:
+def parse_date_floor_ms(v):
+    if v in (None, ""): return float("nan")
+    # Excel serial
     try:
-        kpi_configs.append({
-            "task_type": row[cfg_headers.index("task_type")],
-            "base": float(row[cfg_headers.index("base")]),
-            "rotation": float(row[cfg_headers.index("rotation")]),
-            "effective": datetime.strptime(row[cfg_headers.index("effective_from")], "%Y-%m-%d")
-        })
+        f = float(v)
+        dt = serial_to_datetime(f)
+        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return dt.timestamp()*1000
     except:
-        continue
+        pass
+    # ← اصلاح: اول ISO، بعد m/d/Y، بعد d/m/Y
+    s = str(v).strip()
+    for fmt in ("%Y-%m-%d","%Y/%m/%d","%m/%d/%Y","%d/%m/%Y","%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            return dt.timestamp()*1000
+        except:
+            continue
+    try:
+        dt = datetime.fromisoformat(s)
+        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return dt.timestamp()*1000
+    except:
+        return float("nan")
 
-def getKPI(taskType, recordDate):
-    configs = [c for c in kpi_configs if c["task_type"] == taskType]
-    configs.sort(key=lambda x: x["effective"])
-    chosen = None
-    for cfg in configs:
-        if recordDate >= cfg["effective"]:
-            chosen = cfg
+def day_start_ms(v): return parse_date_floor_ms(v)
+def day_end_ms(v):
+    ms = parse_date_floor_ms(v)
+    return ms if math.isnan(ms) else ms + (24*60*60*1000 - 1)
+
+# =========================
+# تبدیل A1 / ستون
+# =========================
+def a1(col_idx, row_idx):
+    s, c = "", col_idx
+    while c:
+        c, r = divmod(c - 1, 26)
+        s = chr(65 + r) + s
+    return f"{s}{row_idx}"
+
+def col_to_a(col_idx):
+    s, c = "", col_idx
+    while c:
+        c, r = divmod(c - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+# =========================
+# نرمال‌سازی اعداد/درصد با ارقام فارسی/عربی
+# =========================
+PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+def normalize_digits(s: str) -> str:
+    return s.translate(PERSIAN_DIGITS).translate(ARABIC_INDIC_DIGITS)
+
+def to_number_locale(x, default=0.0):
+    if x in (None, ""): return default
+    s = normalize_digits(str(x)).strip().replace("\u00a0", " ")
+    s = s.replace("%", "").replace("٪", "").strip()
+    s = s.replace(" ", "")
+    s = s.replace("٫", ".")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "")
+            s = s.replace(",", ".")
         else:
-            break
-    return chosen
-
-# ---------------------------
-# Other Work
-# ---------------------------
-other = ws_other.get_all_values()
-blocked_from_date = {}
-
-if other and len(other) > 1:
-    for row in other[1:]:
-        name_raw = norm_str(row[2] if len(row) > 2 else "") or norm_str(row[1] if len(row) > 1 else "")
-        if not name_raw:
-            continue
-        ts_raw = row[0] if len(row) > 0 else ""
-
-        d_only = parse_date_only(ts_raw)
-        if not d_only:
-            dt, _ = parse_date_hour(ts_raw, "")
-            d_only = dt.date() if dt else None
-        if not d_only:
-            continue
-
-        key = norm_name(name_raw)
-        prev = blocked_from_date.get(key)
-        if (prev is None) or (d_only > prev):
-            blocked_from_date[key] = d_only
-
-def is_blocked(full_name: str, rec_dt: datetime, hour: int) -> bool:
-    if rec_dt is None:
-        return False
-    key = norm_name(full_name)
-    d_limit = blocked_from_date.get(key)
-    if not d_limit:
-        return False
-    return rec_dt.date() >= d_limit
-
-# ---------------------------
-# Utility: ساخت ردیف خروجی
-# ---------------------------
-def _perf_to_cell(x):
-    if x == "" or x is None:
-        return ""
+            s = s.replace(",", "")
+    else:
+        if "," in s:
+            parts = s.split(",")
+            if len(parts[-1]) in (1,2):
+                s = s.replace(",", ".")
+            else:
+                s = s.replace(",", "")
     try:
-        f = float(x)
+        return float(s)
     except:
-        return ""
-    return f"{f:.1f}%" if PERF_AS_PERCENT else float(f"{f:.1f}")
+        return default
 
-def build_output_row(full_name, task_type, quantity, record_date, hour, occupied,
-                     order_val, user, perf_without, perf_with, ipo_pack, shift):
-    dt_s  = norm_date_str(record_date)
-    qty_s = norm_num(quantity)
-    hr_s  = norm_num(hour)
-    occ_s = norm_num(occupied)
-    ord_s = norm_num(order_val) if str(task_type).startswith("Pack") else ""
-    perf_wo_cell = _perf_to_cell(perf_without)
-    perf_wi_cell = _perf_to_cell(perf_with)
-    neg_min = (60 - occupied) if (occupied and 0 < occupied < 60) else ""
-    row = [
-        norm_name(full_name),
-        norm_task(norm_str(task_type)),
-        qty_s, dt_s, hr_s, occ_s, ord_s,
-        perf_wo_cell, perf_wi_cell, norm_num(neg_min),
-        norm_num(ipo_pack), norm_str(user), norm_str(shift)
-    ]
-    key_hour = f"{norm_name(row[0])}||{norm_task(row[1])}||{row[3]}||{norm_hour_key(row[4])}"
-    return row, key_hour
+def to_percent_locale(x, default=0.0):
+    val = to_number_locale(x, default=None)
+    if val is None:
+        return default
+    if 0 <= val <= 1:
+        return val
+    if 1 < val <= 1000:
+        return val / 100.0
+    return default
 
-seen_new_keys = set()
+def _to_int_hour(x):
+    if x in (None, ""): return None
+    try:
+        return int(float(normalize_digits(str(x)).strip()))
+    except:
+        return None
 
-def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
-    cfg = getKPI(task_type, raw_dt)
-    perf_without = perf_with = ""
-    if cfg and qty > 0 and occ > 0:
-        perf_without = (qty / cfg['base']) * 100.0
-        perf_with    = (qty / (occ * cfg['rotation'])) * 100.0
+# =========================
+# بدنه اصلی
+# =========================
+def build_hourly_performance():
+    gc = _client()
+    ss = gc.open_by_key(SPREADSHEET_ID)
+    source_ws = ss.worksheet(SOURCE_SHEET)
+    target_ws = ss.worksheet(TARGET_SHEET)
 
-    shift = shift_from_username(user)
-    row, key = build_output_row(full_name, task_type, qty, raw_dt, hour_int, occ,
-                                0, user, perf_without, perf_with, "", shift)
-    if key in existing_keys_hour or key in seen_new_keys:
+    # فیلترها
+    b1 = target_ws.acell("B1").value
+    f1 = target_ws.acell("F1").value
+    j1 = target_ws.acell("J1").value
+    selected_hour = _to_int_hour(f1)
+    selected_shift = (str(j1).strip() if j1 not in (None, "") else None)
+
+    # داده‌ها
+    values = source_ws.get_all_values()
+    if len(values) < 2:
+        target_ws.update(range_name="A4", values=[["⚠️ All_Data خالی است."]])
+        return
+    headers, rows = values[0], values[1:]
+
+    def idx(names):
+        for n in names:
+            if n in headers: return headers.index(n)
+        return -1
+
+    colFullName   = idx(["full_name","Full_Name","FULL_NAME"])
+    colHour       = idx(["hour","Hour","HOUR"])
+    colQuantity   = idx(["quantity","Quantity","QUANTITY"])
+    colOccupied   = idx(["occupied_hours","Occupied_Hours","OCCUPIED_HOURS"])
+    colPerfNoRot  = idx(["performance_without_rotation"])
+    colPerfWith   = idx(["performance_with_rotation"])
+    colTaskType   = idx(["task_type","Task_Type","TASK_TYPE"])
+    colDate       = idx(["date","Date","DATE"])
+    colShift      = idx(["Shift","shift","SHIFT"])
+
+    need = [colFullName,colHour,colQuantity,colOccupied,colPerfNoRot,colPerfWith,colTaskType,colDate,colShift]
+    if any(i<0 for i in need):
+        target_ws.update(range_name="A4", values=[["⚠️ ستون‌های لازم در All_Data یافت نشد."]])
         return
 
-    existing_keys_hour.add(key)
-    seen_new_keys.add(key)
-    new_rows.append(row)
+    # تاریخ هدف
+    start_ms = day_start_ms(b1); end_ms = day_end_ms(b1)
+    if math.isnan(start_ms):
+        dms = [day_start_ms(r[colDate]) for r in rows if not math.isnan(day_start_ms(r[colDate]))]
+        if not dms:
+            target_ws.update(range_name="A4", values=[["⚠️ تاریخ معتبر در All_Data نیست."]])
+            return
+        latest = max(dms)
+        start_ms = latest
+        end_ms = latest + (24*60*60*1000 - 1)
 
-# ---------------------------
-# تب‌های ساده (با پشتیبانی از FBM)
-# ---------------------------
-new_rows = []
+    # ← نرمال‌سازی همیشگی B1 به ISO
+    target_ws.update(range_name="B1", values=[[datetime.utcfromtimestamp(start_ms/1000).date().isoformat()]])
 
-simple_tabs = ["Receive", "Locate", "Sort", "Pack", "Stock taking", "FBM"]
+    # پاکسازی خروجی از ردیف 3+
+    vals = target_ws.get_all_values()
+    if len(vals) >= 3:
+        last_col = max(1, target_ws.col_count)
+        rng = f"A3:{col_to_a(last_col)}{max(3, len(vals))}"
+        target_ws.batch_clear([rng])
 
-for tab in simple_tabs:
-    try:
-        ws = ss.worksheet(tab)
-        data = ws.get_all_values()
-        if not data or len(data) < 2:
-            continue
-        head = data[0]
-        idx = {c.strip(): i for i, c in enumerate(head)}
+    # هدر بلوکی
+    def build_header_row(task_types):
+        hdr = []
+        for i,t in enumerate(task_types):
+            hdr += [f"{t}_full_name", f"{t}_hour", f"{t}_quantity",
+                    f"{t}_occupied_hours", f"{t}_Negative_Minutes",
+                    f"{t}_performance_without_rotation", f"{t}_performance_with_rotation"]
+            if i < len(task_types)-1: hdr.append("")
+        return hdr
 
-        for r in data[1:]:
-            try:
-                full_name = r[idx.get("full_name", -1)]
-                if not full_name:
-                    continue
+    header_row = build_header_row(TASK_TYPES)
+    target_ws.update(values=[header_row], range_name=f"A3:{a1(len(header_row),3)}")
 
-                date_raw = r[idx.get("date", idx.get("Date", -1))]
-                hour_raw = r[idx.get("hour", idx.get("Hour", -1))]
-                record_date, hour = parse_date_hour(date_raw, hour_raw)
-                if not record_date or hour is None:
-                    continue
-                if is_blocked(full_name, record_date, hour):
-                    continue
+    # DataValidation و برچسب‌ها
+    ss.batch_update({
+        "requests": [
+            {
+                "setDataValidation": {
+                    "range": {"sheetId": target_ws.id, "startRowIndex":0,"endRowIndex":1,"startColumnIndex":5,"endColumnIndex":6},
+                    "rule": {
+                        "condition":{"type":"ONE_OF_LIST","values":[{"userEnteredValue":str(i)} for i in range(24)]},
+                        "strict": False, "showCustomUi": True
+                    }
+                }
+            },
+            {
+                "setDataValidation": {
+                    "range": {"sheetId": target_ws.id, "startRowIndex":0,"endRowIndex":1,"startColumnIndex":9,"endColumnIndex":10},
+                    "rule": {
+                        # ====== تغییر: اضافه کردن Shift3 ======
+                        "condition":{"type":"ONE_OF_LIST","values":[{"userEnteredValue":v} for v in ["Shift1","Shift2","Shift3","Flex","Other"]]},
+                        "strict": False, "showCustomUi": True
+                    }
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": target_ws.id, "startRowIndex":2, "endRowIndex":3, "startColumnIndex":0, "endColumnIndex":len(header_row)},
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red":1.0,"green":0.902,"blue":0.412},  # #FFE699
+                            "horizontalAlignment":"CENTER",
+                            "textFormat":{"bold": True}
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"
+                }
+            }
+        ]
+    })
+    target_ws.update(range_name="E1", values=[["Hour"]])
+    target_ws.update(range_name="I1", values=[["Shift"]])
 
-                start = r[idx.get("Start", -1)]
-                end   = r[idx.get("End",   -1)]
-                qty   = r[idx.get("Count", idx.get("count", -1))]
-                
-                # مدیریت username برای FBM
-                if tab == "FBM":
-                    user = full_name
-                else:
-                    user = r[idx.get("username", -1)]
-                
-                order_val_raw = r[idx.get("count_order", -1)] if "count_order" in idx else ""
+    # فیلتر
+    filtered = []
+    for r in rows:
+        dms = day_start_ms(r[colDate])
+        if math.isnan(dms) or not (start_ms <= dms <= end_ms): continue
+        if selected_hour is not None and _to_int_hour(r[colHour]) != selected_hour: continue
+        if selected_shift is not None and str(r[colShift]).strip() != selected_shift: continue
+        filtered.append(r)
 
-                quantity = float(qty) if qty else 0
-                fromMin  = float(start) if start else 0
-                toMin    = float(end)   if end   else 0
-                occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0
-                if quantity < MIN_QTY_OUT or occupied <= 0:
-                    continue
+    if not filtered:
+        target_ws.update(range_name="A4", values=[["ℹ️ نتیجه فیلتر خالی است (تاریخ/ساعت/شیفت را چک کنید)."]])
+        return
 
-                ipo_pack, task_type = "", tab
-                
-                # فیلتر Receive
-                if tab == "Receive":
-                    center = r[idx.get("warehouse_name", idx.get("warehouses_name", -1))]
-                    if not is_allowed_receive_center(center):
-                        continue
+    # گروه‌بندی و تبدیل انواع
+    rows_by_task = {t: [] for t in TASK_TYPES}
+    for r in filtered:
+        t = str(r[colTaskType]).strip()
+        if t not in rows_by_task: continue
+        occ = to_number_locale(r[colOccupied])
+        neg = max(0.0, 60.0 - occ)
+        perf_no  = to_percent_locale(r[colPerfNoRot])
+        perf_yes = to_percent_locale(r[colPerfWith])
+        rows_by_task[t].append([
+            r[colFullName],
+            _to_int_hour(r[colHour]),
+            to_number_locale(r[colQuantity]),
+            occ,
+            int(neg),
+            perf_no,
+            perf_yes
+        ])
 
-                # پردازش Pack
-                order_val = 0
-                if tab == "Pack":
-                    order_val = float(order_val_raw) if order_val_raw else 0
-                    if order_val > 0:
-                        ipo_pack = round(quantity / order_val, 2)
-                    task_type = "Pack_Single" if (order_val > 0 and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
-                
-                # تنظیم task_type برای FBM
-                if tab == "FBM":
-                    task_type = "FBM"
+    for t in TASK_TYPES:
+        rows_by_task[t].sort(key=lambda x: (x[1] if x[1] is not None else -9999), reverse=True)
 
-                # محاسبه KPI
-                perf_without = perf_with = ""
-                cfg = getKPI(task_type, record_date)
-                if cfg and quantity > 0 and occupied > 0:
-                    perf_without = (quantity / cfg['base']) * 100.0
-                    perf_with    = (quantity / (occupied * cfg['rotation'])) * 100.0
+    max_len = max((len(v) for v in rows_by_task.values()), default=0)
+    if max_len == 0:
+        target_ws.update(range_name="A4", values=[["ℹ️ بعد از گروه‌بندی چیزی نماند."]])
+        return
 
-                shift = shift_from_username(user)
-                task_type = norm_task(task_type)
-                row, key = build_output_row(
-                    full_name, task_type, quantity, record_date, hour, occupied,
-                    order_val, user, perf_without, perf_with, ipo_pack, shift
-                )
-                if key in existing_keys_hour or key in seen_new_keys:
-                    continue
-                existing_keys_hour.add(key)
-                seen_new_keys.add(key)
-                new_rows.append(row)
-            except Exception as e:
-                print(f"❌ Error in {tab}: {e}")
-                continue
-    except Exception as e:
-        print(f"❌ Worksheet '{tab}' not found or error: {e}")
+    # خروجی
+    output = []
+    for i in range(max_len):
+        row_out = []
+        for j,t in enumerate(TASK_TYPES):
+            if i < len(rows_by_task[t]): row_out += rows_by_task[t][i]
+            else: row_out += ["","","","","","",""]
+            if j < len(TASK_TYPES)-1: row_out.append("")
+        output.append(row_out)
 
-# ---------------------------
-# Pick & Presort (بدون *_Larg)
-# ---------------------------
-def _read_tab_rows_for(tab_name):
-    rows = []
-    try:
-        ws = ss.worksheet(tab_name)
-        data = ws.get_all_values()
-        if not data or len(data) < 2:
-            return rows
-        head = data[0]
-        idx = {c.strip(): i for i, c in enumerate(head)}
+    end_col = len(header_row); end_row = 3 + len(output)
+    target_ws.update(values=output, range_name=f"A4:{a1(end_col,end_row)}")
 
-        for r in data[1:]:
-            try:
-                full_name_raw = r[idx.get("full_name", -1)]
-                if not full_name_raw:
-                    continue
+    # فرمت عددی ستون‌ها
+    requests = []
+    for b in range(len(TASK_TYPES)):
+        start_col = b*8
+        neg_col   = start_col + 4
+        pct_no    = start_col + 5
+        pct_with  = start_col + 6
+        if b > 0:
+            sep = start_col - 1
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": target_ws.id, "startRowIndex":2, "endRowIndex":end_row, "startColumnIndex":sep, "endColumnIndex":sep+1},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red":0.94,"green":0.94,"blue":0.94}}},
+                    "fields": "userEnteredFormat.backgroundColor"
+                }
+            })
+        for col_idx, numfmt in [
+            (neg_col, {"type":"NUMBER","pattern":"0"}),
+            (pct_no,  {"type":"PERCENT","pattern":"0.00%"}),
+            (pct_with,{"type":"PERCENT","pattern":"0.00%"})
+        ]:
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": target_ws.id, "startRowIndex":3, "endRowIndex":end_row, "startColumnIndex":col_idx, "endColumnIndex":col_idx+1},
+                    "cell": {"userEnteredFormat": {"numberFormat": numfmt}},
+                    "fields": "userEnteredFormat.numberFormat"
+                }
+            })
+    if requests:
+        ss.batch_update({"requests": requests})
 
-                date_raw = r[idx.get("date", idx.get("Date", -1))]
-                hour_raw = r[idx.get("hour", idx.get("Hour", -1))]
-                record_date, hour = parse_date_hour(date_raw, hour_raw)
-                if not record_date or hour is None:
-                    continue
-                if is_blocked(full_name_raw, record_date, hour):
-                    continue
+    print("✅ Done.")
 
-                start = r[idx.get("Start", -1)]
-                end   = r[idx.get("End",   -1)]
-                qty   = r[idx.get("Count", idx.get("count", -1))]
-                user  = r[idx.get("username", -1)]
-
-                quantity = float(qty) if qty else 0.0
-                fromMin  = float(start) if start else 0.0
-                toMin    = float(end)   if end   else 0.0
-                occupied = (toMin - fromMin + 1) if (toMin - fromMin) > 0 else 0.0
-                if quantity <= 0 or occupied <= 0:
-                    continue
-
-                rows.append({
-                    "name_key": norm_name(full_name_raw),
-                    "full_name_raw": full_name_raw,
-                    "raw_date": record_date,
-                    "date": norm_date_str(record_date),
-                    "hour": int(hour),
-                    "quantity": quantity,
-                    "occupied": occupied,
-                    "user": user
-                })
-            except Exception as e:
-                print(f"❌ Error in {tab_name}: {e}")
-                continue
-    except Exception as e:
-        print(f"❌ Worksheet '{tab_name}' not found or error: {e}")
-    return rows
-
-def _aggregate_hourly(rows):
-    agg = defaultdict(lambda: {"qty": 0.0, "occ": 0.0, "user": None, "dt": None, "name_raw": None})
-    for it in rows:
-        k = (it["name_key"], it["date"], it["hour"])
-        a = agg[k]
-        a["qty"] += it["quantity"]
-        a["occ"] += it["occupied"]
-        a["user"] = it["user"]
-        a["dt"]   = it["raw_date"]
-        if not a["name_raw"]:
-            a["name_raw"] = it.get("full_name_raw") or it["name_key"]
-    return agg
-
-pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
-presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
-
-all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
-
-for (name_key, date_s, hour_int) in all_keys:
-    p = pick_agg.get((name_key, date_s, hour_int))
-    s = presort_agg.get((name_key, date_s, hour_int))
-    display_name = (p and p.get("name_raw")) or (s and s.get("name_raw")) or name_key
-
-    if p and p["qty"] >= MIN_QTY_OUT:
-        _emit_row(display_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
-    if s and s["qty"] >= MIN_QTY_OUT:
-        _emit_row(display_name, "Presort", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
-
-# ---------------------------
-# درج نهایی
-# ---------------------------
-if new_rows:
-    ws_all.append_rows(new_rows, value_input_option="RAW")
-    print(f"✅ Added {len(new_rows)} new rows.")
-else:
-    print("ℹ️ No new rows to add.")
-
-sys.exit(0)
+# اجرای مستقیم
+if __name__ == "__main__":
+    build_hourly_performance()
