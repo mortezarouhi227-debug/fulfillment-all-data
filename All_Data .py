@@ -1,4 +1,4 @@
-# All_Data.py (override-only for *_Larg* + presort exclusivity + strong normalization + FBM support)
+# All_Data.py (بدون *_Larg - فقط Pick, Presort, FBM و بقیه)
 # -*- coding: utf-8 -*-
 import os, json, sys, re, unicodedata
 from datetime import datetime, timedelta
@@ -197,12 +197,6 @@ def shift_from_username(user):
 
 # Receive center filter
 def is_allowed_receive_center(center_raw: str) -> bool:
-    """
-    Only allow centers whose name starts with:
-      - 'مرکز پردازش مهرآباد'
-      - 'هاب گنجه'
-    Drop anything that starts with 'هاب' but is not 'هاب گنجه'.
-    """
     c = norm_name(center_raw)
     if not c:
         return False
@@ -220,10 +214,6 @@ def is_allowed_receive_center(center_raw: str) -> bool:
 ws_all   = ss.worksheet("All_Data")
 ws_cfg   = ss.worksheet("KPI_Config")
 ws_other = ss.worksheet("Other Work")
-try:
-    ws_override = ss.worksheet("Larg_Overrides")
-except:
-    ws_override = None
 
 HEADERS = [
     'full_name','task_type','quantity','date','hour','occupied_hours','order',
@@ -242,8 +232,6 @@ else:
 
 # جلوگیری از تکرار
 existing_keys_hour = set()
-PRESORT_TYPES = {"Presort", "Presort_Larg"}
-existing_presort_hour = set()
 
 for r in vals_all[1:]:
     full_name = norm_name(r[0] if len(r)>0 else "")
@@ -253,8 +241,6 @@ for r in vals_all[1:]:
     hr_key    = norm_hour_key(hr_raw)
     if full_name and dt != "" and hr_key != "":
         existing_keys_hour.add(f"{full_name}||{task_type}||{dt}||{hr_key}")
-        if task_type in PRESORT_TYPES:
-            existing_presort_hour.add((full_name, dt, hr_key))
 
 # ---------------------------
 # KPI Config
@@ -283,17 +269,6 @@ def getKPI(taskType, recordDate):
         else:
             break
     return chosen
-
-def getKPI_with_fallback(task_type, recordDate):
-    cfg = getKPI(task_type, recordDate)
-    if cfg:
-        return cfg
-    if task_type == "Pick_Larg":
-        return getKPI("Pick", recordDate)
-    if task_type == "Presort_Larg":
-        return getKPI("Presort", recordDate)
-    # FBM در KPI_Config تعریف شده، پس نیازی به fallback نیست
-    return None
 
 # ---------------------------
 # Other Work
@@ -362,16 +337,9 @@ def build_output_row(full_name, task_type, quantity, record_date, hour, occupied
     return row, key_hour
 
 seen_new_keys = set()
-seen_new_presort_hour = set()
 
 def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
-    # انحصار Presort
-    if task_type in PRESORT_TYPES:
-        base_triplet = (norm_name(full_name), norm_date_str(raw_dt), norm_hour_key(hour_int))
-        if base_triplet in existing_presort_hour or base_triplet in seen_new_presort_hour:
-            return
-
-    cfg = getKPI_with_fallback(task_type, raw_dt)
+    cfg = getKPI(task_type, raw_dt)
     perf_without = perf_with = ""
     if cfg and qty > 0 and occ > 0:
         perf_without = (qty / cfg['base']) * 100.0
@@ -383,21 +351,15 @@ def _emit_row(full_name, task_type, qty, occ, user, raw_dt, hour_int):
     if key in existing_keys_hour or key in seen_new_keys:
         return
 
-    if task_type in PRESORT_TYPES:
-        base_triplet = (row[0], row[3], norm_hour_key(row[4]))
-        existing_presort_hour.add(base_triplet)
-        seen_new_presort_hour.add(base_triplet)
-
     existing_keys_hour.add(key)
     seen_new_keys.add(key)
     new_rows.append(row)
 
 # ---------------------------
-# تب‌های ساده (با اضافه شدن FBM)
+# تب‌های ساده (با پشتیبانی از FBM)
 # ---------------------------
 new_rows = []
 
-# ====== اضافه کردن FBM به لیست ======
 simple_tabs = ["Receive", "Locate", "Sort", "Pack", "Stock taking", "FBM"]
 
 for tab in simple_tabs:
@@ -427,9 +389,9 @@ for tab in simple_tabs:
                 end   = r[idx.get("End",   -1)]
                 qty   = r[idx.get("Count", idx.get("count", -1))]
                 
-                # ====== مدیریت username برای FBM (چون ستون username نداره) ======
+                # مدیریت username برای FBM
                 if tab == "FBM":
-                    user = full_name  # FBM از full_name به جای username استفاده می‌کنه
+                    user = full_name
                 else:
                     user = r[idx.get("username", -1)]
                 
@@ -458,9 +420,9 @@ for tab in simple_tabs:
                         ipo_pack = round(quantity / order_val, 2)
                     task_type = "Pack_Single" if (order_val > 0 and 1 <= ipo_pack <= 1.2) else "Pack_Multi"
                 
-                # ====== تنظیم task_type برای FBM ======
+                # تنظیم task_type برای FBM
                 if tab == "FBM":
-                    task_type = "FBM"  # یا هر اسم دیگه‌ای که مد نظر هست
+                    task_type = "FBM"
 
                 # محاسبه KPI
                 perf_without = perf_with = ""
@@ -487,7 +449,7 @@ for tab in simple_tabs:
         print(f"❌ Worksheet '{tab}' not found or error: {e}")
 
 # ---------------------------
-# Pick & Presort + Overrides
+# Pick & Presort (بدون *_Larg)
 # ---------------------------
 def _read_tab_rows_for(tab_name):
     rows = []
@@ -555,122 +517,15 @@ def _aggregate_hourly(rows):
             a["name_raw"] = it.get("full_name_raw") or it["name_key"]
     return agg
 
-def _read_overrides(ws):
-    force = set()
-    only  = {}
-    if not ws:
-        print("ℹ️ Larg_Overrides sheet not found.")
-        return force, only
-
-    try:
-        data = ws.get_all_values()
-        if not data or len(data) < 2:
-            print("ℹ️ Larg_Overrides is empty.")
-            return force, only
-
-        header = [(h or "").strip() for h in data[0]]
-
-        def idx_exact(col_name):
-            try:
-                return header.index(col_name)
-            except ValueError:
-                return -1
-
-        col_date = idx_exact("تاریخ حضور در لوکیشن")
-        col_hour = idx_exact("ساعت حضور در لوکیشن")
-        col_name = idx_exact("نام پرسنلی")
-        col_type = idx_exact("لوکیشن کاری")
-
-        if min(col_date, col_hour, col_name, col_type) < 0:
-            print("⚠️ Using fallback headers for Larg_Overrides (exact headers not all found).")
-
-            def find_col(cands):
-                for cand in cands:
-                    for i, h in enumerate(header):
-                        if h.lower() == cand.lower():
-                            return i
-                return -1
-
-            col_date = col_date if col_date >= 0 else find_col(["Timestamp","date","تاریخ"])
-            col_hour = col_hour if col_hour >= 0 else find_col(["hour","ساعت","ساعت حضور در لوکیشن"])
-            col_name = col_name if col_name >= 0 else find_col(["full_name","نام","name","نام پرسنلی","Column 5"])
-            col_type = col_type if col_type >= 0 else find_col(["type","task_type","لوکیشن کاری"])
-
-        if min(col_date, col_hour, col_name, col_type) < 0:
-            print("❌ Larg_Overrides headers not found (need تاریخ/ساعت/نام/نوع). No overrides applied.")
-            return force, only
-
-        for r in data[1:]:
-            try:
-                if max(col_date, col_hour, col_name, col_type) >= len(r):
-                    continue
-
-                date_raw = r[col_date]
-                hour_raw = r[col_hour]
-                name_raw = r[col_name]
-                type_raw = (r[col_type] or "").strip()
-                if not name_raw or not type_raw:
-                    continue
-
-                t = type_raw.replace("_Larg", "").strip().lower()
-                if t in ("پیک", "pick"):
-                    t = "pick"
-                elif t in ("پری سورت", "presort", "pre-sort", "pre sort"):
-                    t = "presort"
-                if t not in ("pick", "presort"):
-                    continue
-
-                dt, hr = parse_date_hour(date_raw, hour_raw)
-                if not dt or hr is None:
-                    d_only = parse_date_only(date_raw)
-                    if d_only is None:
-                        continue
-                    try:
-                        hr = int(str(hour_raw).strip())
-                        if not (0 <= hr <= 23):
-                            continue
-                    except:
-                        continue
-                    dt = datetime(d_only.year, d_only.month, d_only.day)
-
-                key = (norm_name(norm_str(name_raw)), norm_date_str(dt), int(hr))
-                force.add(key)
-                only[key] = t
-            except Exception as e:
-                print(f"❌ Error reading a row in Larg_Overrides: {e}")
-                continue
-
-    except Exception as e:
-        print(f"❌ Error reading Larg_Overrides: {e}")
-
-    return force, only
-
 pick_agg    = _aggregate_hourly(_read_tab_rows_for("Pick"))
 presort_agg = _aggregate_hourly(_read_tab_rows_for("Presort"))
-force_larg, force_only = _read_overrides(ws_override)
 
 all_keys = set(pick_agg.keys()) | set(presort_agg.keys())
 
 for (name_key, date_s, hour_int) in all_keys:
     p = pick_agg.get((name_key, date_s, hour_int))
     s = presort_agg.get((name_key, date_s, hour_int))
-
-    in_force = (name_key, date_s, int(hour_int)) in force_larg
-    mode = force_only.get((name_key, date_s, int(hour_int)))
     display_name = (p and p.get("name_raw")) or (s and s.get("name_raw")) or name_key
-
-    if in_force:
-        if mode == "pick":
-            if p and p["qty"] >= MIN_QTY_OUT:
-                _emit_row(display_name, "Pick_Larg", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
-            if s and s["qty"] >= MIN_QTY_OUT:
-                _emit_row(display_name, "Presort",   s["qty"], s["occ"], s["user"], s["dt"], hour_int)
-        elif mode == "presort":
-            if s and s["qty"] >= MIN_QTY_OUT:
-                _emit_row(display_name, "Presort_Larg", s["qty"], s["occ"], s["user"], s["dt"], hour_int)
-            if p and p["qty"] >= MIN_QTY_OUT:
-                _emit_row(display_name, "Pick",         p["qty"], p["occ"], p["user"], p["dt"], hour_int)
-        continue
 
     if p and p["qty"] >= MIN_QTY_OUT:
         _emit_row(display_name, "Pick", p["qty"], p["occ"], p["user"], p["dt"], hour_int)
